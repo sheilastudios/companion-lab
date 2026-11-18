@@ -1,0 +1,22 @@
+{
+ "context": "plugins/turns",
+ "port": 8814,
+ "model": {
+  "command": [
+   "python",
+   "-X",
+   "utf8",
+   "-B",
+   "models/openai_compatible/adapter.py"
+  ],
+  "options": {
+   "base_url": "http://localhost:1234/v1",
+   "timeout_seconds": 600
+  },
+  "models": [],
+  "efforts": [
+   "default"
+  ],
+  "default_effort": "default"
+ }
+}

@@ -1,0 +1,10 @@
+{
+ "context": "plugins/turns",
+ "port": 8814,
+ "model": {
+  "command": ["python", "-X", "utf8", "-B", "models/openai_compatible/adapter.py"],
+  "options": {"base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY", "models": ["gpt-5.5"]},
+  "models": ["gpt-5.5"],
+  "default_model": "gpt-5.5"
+ }
+}

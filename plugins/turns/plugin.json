@@ -1,0 +1,40 @@
+{
+ "id": "turns",
+ "command": [
+  "python",
+  "-X",
+  "utf8",
+  "-B",
+  "plugin.py"
+ ],
+ "stateful": false,
+ "roles": [
+  "system",
+  "assistant",
+  "user"
+ ],
+ "settings": [],
+ "labels": {
+  "them": "Them",
+  "thinking": "Thinking…",
+  "silence": "(No reply.)"
+ },
+ "parts_note": "Each part is a message: choose its role (system, assistant or user) and where it goes. Before the conversation, system parts are joined into one system message at the top, and other parts follow in order. Just before the newest message, each part is its own message. Where a part sits can change the result, so try it.",
+ "seed": "seed.json",
+ "imports": [
+  "character_card"
+ ],
+ "positions": [
+  [
+   "start",
+   "Before the conversation"
+  ],
+  [
+   "late",
+   "Before the newest message"
+  ]
+ ],
+ "exports": [
+  "character_card"
+ ]
+}

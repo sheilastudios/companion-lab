@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Companion Lab</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#121c22;color:#e9edf1;font:15px/1.55 system-ui;overflow:hidden}
+button,select,textarea,input{font:inherit;border:1px solid #526367;border-radius:8px;background:#1c2b32;color:inherit;padding:6px 10px}
+button{cursor:pointer}button:disabled{opacity:.45;cursor:default}h1{margin:0;font:26px Georgia,serif;color:#ecd7bd;flex:1}h2{font:600 13px system-ui;color:#c9b596;margin:18px 0 6px;text-transform:uppercase;letter-spacing:.06em}
+.wrap{height:100vh;height:100dvh;max-width:860px;margin:auto;display:flex;flex-direction:column}.top{padding:12px 18px;border-bottom:1px solid #35464b}.head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.head select{max-width:230px}
+#history{flex:1;min-height:0;overflow:auto;padding:6px 18px}.msg{white-space:pre-wrap;padding:12px 16px;margin:10px 0;background:#1d2d34;border-radius:12px;line-height:1.65}.msg.user{margin-left:10%;background:#294039}
+.who{font-size:12px;color:#c9b596;margin-bottom:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.sp{flex:1}.who button{padding:1px 8px;font-size:12px}.meta{font-size:11.5px;color:#8fa3a6;margin-top:8px;white-space:normal}
+footer{padding:10px 18px;border-top:1px solid #35464b}footer textarea{width:100%;resize:vertical}#send{background:#315d4d}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}.note{font-size:12.5px;color:#afc2c4}#error,#labError{color:#ffd19d;white-space:pre-wrap;font-size:13px}
+dialog{background:#101b20;color:inherit;border:1px solid #526367;border-radius:12px;width:min(1000px,94vw);max-height:88vh;padding:0 18px 18px;overflow:auto}dialog::backdrop{background:#0009}dialog pre{white-space:pre-wrap;font:12px/1.5 ui-monospace,Consolas,monospace}.dlghead{position:sticky;top:0;background:#101b20;padding:12px 0;margin:0;z-index:1}
+#drawer{inset:0 0 0 auto;margin:0;width:min(760px,100%);max-width:100%;height:100dvh;max-height:100dvh;border-radius:0;border-width:0 0 0 1px;padding:0 18px 18px;background:#0f181d}
+.part{border:1px solid #2f4045;border-radius:10px;margin:8px 0;background:#15232a}.part.off{opacity:.55}.phead{display:flex;gap:8px;align-items:center;padding:7px 10px;flex-wrap:wrap}.phead input[type=text]{flex:1;min-width:120px}.phead button,.phead select{padding:2px 8px;font-size:12px}
+.part textarea,.setText{width:100%;border:0;border-top:1px solid #2f4045;border-radius:0 0 10px 10px;background:#101b20;font:12.5px/1.5 ui-monospace,Consolas,monospace;resize:vertical}.part textarea{min-height:220px}.setText{min-height:90px;border:1px solid #2f4045;border-radius:8px}.tok{font-size:12px;color:#9fb3b5}.dirty{color:#ffd19d}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}.cols h2{font-size:14px;margin:10px 0 4px}@media(max-width:700px){.cols{grid-template-columns:1fr}}
+@media(max-width:600px){.top,footer{padding:10px}#history{padding:6px 10px}.msg{padding:10px}}
+</style>
+<div class="wrap">
+ <div class="top"><div class="head"><h1>Companion Lab</h1><button id="new">New conversation</button><label>Saved <select id="sessions"><option value="">Choose…</option></select></label><span id="copyAllSlot"></span><button id="openLab">Lab</button></div>
+  <div id="status" class="note"></div><div id="storageWarning" class="note" role="status"></div><div id="error" role="alert"></div></div>
+ <main id="history"></main>
+ <footer><div id="thinking" class="note"></div><textarea id="message" rows="3" placeholder="Say something…  (Enter sends, Shift+Enter for a new line)"></textarea><div class="row"><button id="send">Send</button></div></footer>
+</div>
+<dialog id="drawer"><div class="row dlghead"><h1 style="font-size:22px">Lab</h1><button id="closeLab">Close</button></div>
+ <div id="labError"></div>
+ <div class="row"><label>Model <select id="model"></select></label><label>Effort <select id="effort"></select></label><button id="adopt" title="Switch this conversation to the saved prompt for its next turns">Use saved prompt in this conversation</button><button id="memories">View memories</button><button id="dropped">Dropped turns</button><label id="marksBox" hidden><input type="checkbox" id="marks"> <span id="marksLabel"></span></label></div>
+ <div class="note">New conversations use the saved prompt. Open conversations change only when you click “Use saved prompt”. Every saved version is kept.</div>
+ <div id="settings"></div>
+ <h2>Parts</h2>
+ <div id="partsNote" class="note"></div>
+ <div id="parts"></div>
+ <div class="row"><button id="addPart">Add part</button><button id="preview">View assembled prompt</button><button id="previewDl" title="Download the prompt assembled from the editor as a text file">Download assembled prompt</button></div>
+ <h2>Save</h2>
+ <div class="row"><input id="note" type="text" placeholder="note for this save (optional)" style="flex:1"><button id="save">Save prompt</button><button id="revert">Discard edits</button><span id="dirty" class="dirty"></span></div>
+ <div class="row"><label>Saved versions <select id="versions"><option value="">Load a version…</option></select></label></div>
+ <div class="row" id="importRow" hidden><button id="importCard">Import character card…</button><button id="exportCard" hidden title="Download the prompt in the editor as a SillyTavern V2 card">Export character card</button><input type="file" id="cardFile" accept=".json,.png,application/json,image/png" hidden><span class="note">SillyTavern V1, V2 or V3 cards, as JSON or PNG. The card fills the editor; save to keep it.</span></div>
+ <div id="cmpBox"><h2>Side by side</h2>
+  <div class="note">Send one message under two saved versions and compare the replies. Nothing is added to a conversation; both are kept under data/compares.</div>
+  <div class="row"><label>A <select id="cmpA"></select></label><label>B <select id="cmpB"></select></label><label><input type="checkbox" id="cmpCont"> continue the open conversation</label></div>
+  <div class="row"><textarea id="cmpMsg" rows="2" placeholder="The message to send under both versions" style="flex:1"></textarea><button id="cmpRun">Run side by side</button></div></div>
+</dialog>
+<dialog id="cmp"><div class="row dlghead"><strong id="cmpTitle" style="flex:1"></strong><button id="cmpDl" title="Download both replies as a text file">Download</button><button id="cmpClose">Close</button></div><div class="cols"><div><h2 id="cmpHA"></h2><pre id="cmpBA"></pre></div><div><h2 id="cmpHB"></h2><pre id="cmpBB"></pre></div></div></dialog>
+<dialog id="dlg"><div class="row dlghead"><strong id="dlgTitle" style="flex:1"></strong><button id="dlgDl" title="Download what this window shows as a text file">Download</button><button id="dlgClose">Close</button></div><pre id="dlgBody"></pre></dialog>
+<script src="/plugin/display.js"></script>
+<script>
+const $=id=>document.getElementById(id);let C=null,SAVED='',S=null,busy=false,open=new Set(),P={roles:['system'],settings:[],labels:{}},L={them:'Assistant',thinking:'Thinking…',silence:'(No reply.)'};
+async function api(path,body){const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Companion-Lab':'1'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d;}
+const err=e=>{$('error').textContent=e?e.message||e:'';$('labError').textContent=$('error').textContent;};
+const show=(t,b)=>{$('dlgTitle').textContent=t;$('dlgBody').textContent=b;$('dlg').showModal();};
+$('dlgClose').onclick=()=>$('dlg').close();function fileName(title,sessionId=S?.id){const d=new Date(),z=n=>String(n).padStart(2,'0');const stamp=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;const conv=sessionId?`-${sessionId.slice(0,8)}`:'';const slug=String(title).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'prompt';return `companion-lab${conv}-${slug}-${stamp}.txt`;}function download(title,text,sessionId=S?.id){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));a.download=fileName(title,sessionId);document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}$('dlgDl').onclick=()=>download($('dlgTitle').textContent,$('dlgBody').textContent);$('openLab').onclick=()=>$('drawer').showModal();$('closeLab').onclick=()=>$('drawer').close();
+// A click on the backdrop, outside a window, closes it. Only clicks whose target is the dialog itself and that land outside its box count,
+// so a dropdown list that extends past the edge, or a click in the window's padding, never closes it.
+for(const d of document.querySelectorAll('dialog'))d.addEventListener('click',e=>{if(e.target!==d)return;const r=d.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)d.close();});
+function dirty(){$('dirty').textContent=JSON.stringify(C)!==SAVED?'● unsaved edits':'';}
+// An asynchronous editor operation owns only the editor version it started from.
+let editorTicket=0,savingPrompt=false;
+function editorStamp(){return JSON.stringify(C)+'\u0000'+$('note').value;}
+function renderSettings(){const box=$('settings');box.replaceChildren();if(!P.settings?.length)return;const h=document.createElement('h2');h.textContent='Settings';box.append(h);
+ for(const k of P.settings){if(k.type==='text'){const n=document.createElement('div');n.className='note';n.textContent=k.label;const t=document.createElement('textarea');t.className='setText';t.spellcheck=false;t.value=C[k.key]??'';t.oninput=()=>{C[k.key]=t.value;dirty();};box.append(n,t);}
+  else{const r=document.createElement('div');r.className='row';const l=document.createElement('label');if(k.type==='bool'){const c=document.createElement('input');c.type='checkbox';c.checked=C[k.key]===true;c.onchange=()=>{C[k.key]=c.checked;dirty();};l.append(c,' '+k.label);}else{const e=document.createElement('select');for(const o of k.options)e.add(new Option(o[1],o[0]));e.value=C[k.key]??k.options[0][0];e.onchange=()=>{C[k.key]=e.value;dirty();};l.append(k.label+' ',e);}r.append(l);box.append(r);}}}
+function renderCfg(){renderSettings();const box=$('parts');box.replaceChildren();
+ C.parts.forEach((p,i)=>{const el=document.createElement('div');el.className='part'+(p.enabled?'':' off');const h=document.createElement('div');h.className='phead';
+  const cb=document.createElement('input');cb.type='checkbox';cb.checked=p.enabled;cb.onchange=()=>{p.enabled=cb.checked;el.classList.toggle('off',!p.enabled);dirty();};
+  const nm=document.createElement('input');nm.type='text';nm.value=p.name;nm.oninput=()=>{p.name=nm.value;dirty();};
+  const role=document.createElement('select');for(const r of P.roles)role.add(new Option(r,r));role.value=p.role;role.title='The message role this part is sent as';role.onchange=()=>{p.role=role.value;dirty();};
+  const pos=document.createElement('select');pos.hidden=!P.positions;if(P.positions){for(const [v,l] of P.positions)pos.add(new Option(l,v));if(!p.position)p.position=P.positions[0][0];pos.value=p.position;pos.title='Where this part goes in what is sent';pos.onchange=()=>{p.position=pos.value;dirty();};}
+  const wh=document.createElement('select');wh.add(new Option('every turn','always'));wh.add(new Option('turn 1 only','opening'));wh.value=p.when==='opening'?'opening':'always';wh.title='Turn 1 only: sent with the first turn of a conversation and not after, for an opening scene.';wh.onchange=()=>{if(wh.value==='opening')p.when='opening';else delete p.when;dirty();};
+  const t=document.createElement('span');t.className='tok';t.textContent='≈'+Math.round(p.text.length/4).toLocaleString()+' tok';
+  const ta=document.createElement('textarea');ta.value=p.text;ta.spellcheck=false;ta.hidden=!open.has(i);ta.oninput=()=>{p.text=ta.value;t.textContent='≈'+Math.round(p.text.length/4).toLocaleString()+' tok';dirty();};
+  const b=(l,f)=>{const x=document.createElement('button');x.textContent=l;x.onclick=f;return x;};
+  const tg=b(open.has(i)?'Hide':'Show / edit',()=>{ta.hidden=!ta.hidden;ta.hidden?open.delete(i):open.add(i);tg.textContent=ta.hidden?'Show / edit':'Hide';});
+  h.append(cb,nm,role,pos,wh,t,tg,b('↑',()=>{if(i>0){[C.parts[i-1],C.parts[i]]=[C.parts[i],C.parts[i-1]];open.clear();renderCfg();dirty();}}),b('↓',()=>{if(i<C.parts.length-1){[C.parts[i+1],C.parts[i]]=[C.parts[i],C.parts[i+1]];open.clear();renderCfg();dirty();}}),b('✕',()=>{if(confirm('Remove "'+p.name+'" from the editor? Saved versions keep it.')){C.parts.splice(i,1);open.clear();renderCfg();dirty();}}));
+  const src=document.createElement('div');src.className='note';src.style.padding='0 10px 6px';src.textContent=p.source||'';el.append(h,src,ta);box.append(el);});dirty();}
+$('addPart').onclick=()=>{C.parts.push({name:'New part',role:P.roles[0],...(P.positions?{position:P.positions[0][0]}:{}),enabled:true,source:'added in lab',text:''});open.add(C.parts.length-1);renderCfg();dirty();};
+$('preview').onclick=async()=>{try{show('Assembled prompt, from the editor',(await api('/api/preview',{config:C})).text);}catch(e){err(e)}};$('previewDl').onclick=async()=>{try{download('assembled prompt',(await api('/api/preview',{config:C})).text);}catch(e){err(e)}};
+$('save').onclick=async()=>{
+ if(savingPrompt)return;
+ savingPrompt=true;$('save').disabled=true;
+ const ticket=++editorTicket;C.note=$('note').value;const basis=editorStamp();
+ try{
+  err();const d=await api('/api/prompt/save',{config:C});SAVED=JSON.stringify(d.config);
+  if(ticket===editorTicket&&basis===editorStamp()){C=d.config;$('note').value='';renderCfg();}
+  await refresh(true);dirty();renderStatus();
+ }catch(e){err(e)}finally{savingPrompt=false;$('save').disabled=false;}
+};
+$('revert').onclick=()=>{if(confirm('Discard unsaved edits?')){editorTicket++;C=JSON.parse(SAVED);open.clear();renderCfg();}};
+$('versions').onchange=async()=>{
+ const name=$('versions').value;$('versions').value='';if(!name)return;
+ const ticket=++editorTicket,basis=editorStamp();
+ try{
+  const d=await api('/api/prompt/version',{name});
+  if(ticket!==editorTicket||basis!==editorStamp())return;
+  C=d.config;open.clear();renderCfg();
+ }catch(e){err(e)}
+};
+// Character cards: the file is read here and sent as base64; the lab parses it and the plugin maps it. The result lands in the editor unsaved.
+$('importCard').onclick=()=>$('cardFile').click();
+$('cardFile').onchange=async()=>{const f=$('cardFile').files[0];$('cardFile').value='';if(!f)return;if(JSON.stringify(C)!==SAVED&&!confirm('The editor has unsaved edits. Replace them with the imported character?'))return;
+ const ticket=++editorTicket,basis=editorStamp();
+ try{err();const data=await new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(String(r.result).split(',')[1]||'');r.onerror=()=>no(r.error);r.readAsDataURL(f);});
+  const d=await api('/api/import_card',{name:f.name,data});if(ticket!==editorTicket||basis!==editorStamp())return;C=d.config;open.clear();renderCfg();dirty();show('Character card imported',d.notes.join('\n\n'));}catch(e){err(e)}};
+// Export: the editor's prompt (saved or not) as a V2 card. The name becomes {{char}}; nothing is saved.
+$('exportCard').onclick=async()=>{const guess=((C.parts.find(p=>/^You are ([^,.]+)/.test(p.text))||{}).text||'').match(/^You are ([^,.]+)/)?.[1]||'';const name=prompt('Character name for the card:',guess);if(name===null)return;
+ try{err();const d=await api('/api/export_card',{config:C,name});const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(d.card,null,1)],{type:'application/json'}));a.download=(String(name).trim().replace(/[^A-Za-z0-9 _-]+/g,'').replace(/\s+/g,'-')||'character')+'.json';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);if(d.notes.length>1)show('Character card exported',d.notes.join('\n\n'));}catch(e){err(e)}};
+// Side by side: one message under two saved versions; nothing is added to a conversation.
+let CMP=null;
+$('cmpRun').onclick=async()=>{const a=$('cmpA').value,b=$('cmpB').value,m=$('cmpMsg').value.trim();if(!a||!b||!m){err('Choose two saved versions and write a message.');return;}
+ if($('cmpCont').checked&&!S){err('Open a conversation to continue it, or untick that box.');return;}
+ if(busy){err('A turn is in progress. Try side by side when it has finished.');return;}
+ try{err();busy=true;renderChat();$('cmpRun').disabled=true;$('cmpRun').textContent='Running both…';
+  const r=await api('/api/compare',{a,b,message:m,model:$('model').value,effort:$('effort').value,...($('cmpCont').checked?{id:S.id}:{})});CMP=r;
+  const side=(x,h,body)=>{$(h).textContent=x.version.replace('.json','')+(x.error?' · failed':` · ${x.words} words · ${x.seconds}s`);$(body).textContent=x.error?x.error:shown(x.text);};
+  side(r.a,'cmpHA','cmpBA');side(r.b,'cmpHB','cmpBB');$('cmpTitle').textContent=`Side by side: “${r.message.slice(0,80)}”`+(r.history_turns?` after ${r.history_turns} turns`:'');$('cmp').showModal();}
+ catch(e){err(e)}finally{busy=false;renderChat();$('cmpRun').disabled=false;$('cmpRun').textContent='Run side by side';}};
+$('cmpClose').onclick=()=>$('cmp').close();
+$('cmpDl').onclick=()=>{if(!CMP)return;download('side by side',`SIDE BY SIDE ${CMP.id}\n${CMP.at} · model ${CMP.model} · effort ${CMP.effort}`+(CMP.continued?` · continuing ${CMP.continued} after ${CMP.history_turns} turns`:'')+`\n\nMessage:\n${CMP.message}\n\n===== A: ${CMP.a.version} =====\n${CMP.a.error||CMP.a.text}\n\n===== B: ${CMP.b.version} =====\n${CMP.b.error||CMP.b.text}\n`);};
+function renderStatus(){if(!S){$('status').textContent='No conversation open. Click “New conversation”.';return;}const same=SAVED&&S.config&&JSON.stringify(S.config)===SAVED;$('status').textContent=`${S.model} · ${S.effort} · ${S.turns.length} turns stored · prompt ${S.prompt}`+(same?'':' · ⚠ differs from the saved prompt');}
+var PENDING=null;
+var SHOW_MARKS=true;try{SHOW_MARKS=localStorage.getItem('marks')!=='off';}catch{}
+function shown(text){return SHOW_MARKS&&window.labDisplay?window.labDisplay.transform(text):String(text);}
+function rich(text){const f=document.createDocumentFragment();let at=0;for(const m of String(text).matchAll(/\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g)){f.append(text.slice(at,m.index));const e=document.createElement('em');e.textContent=m[1]??m[2];f.append(e);at=m.index+m[0].length;}f.append(text.slice(at));return f;}
+function metaText(t){return [`${t.words} words`,`${t.seconds}s`,t.effort,`prompt ${t.prompt}`,...(t.labels||[])].join(' · ')+(t.attempts>1?` · ${t.attempts} attempts`:'');}
+function copyBtn(text,label='Copy'){const value=()=>typeof text==='function'?text():text;const b=document.createElement('button');b.textContent=label;b.onclick=async()=>{let ok=false;try{await navigator.clipboard.writeText(value());ok=true;}catch{const a=document.createElement('textarea');a.value=value();a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();try{ok=document.execCommand('copy');}catch{}a.remove();}b.textContent=ok?'Copied':'Copy failed';setTimeout(()=>{b.textContent=label;},1500);};return b;}
+function renderChat(){const h=$('history');h.replaceChildren();const off=!S||busy;$('message').disabled=$('send').disabled=off;$('adopt').disabled=off;$('sessions').disabled=$('new').disabled=$('effort').disabled=busy;$('dropped').textContent='Dropped turns'+(S?.discarded?.length?' ('+S.discarded.reduce((n,b)=>n+b.turns.length,0)+')':'');renderStatus();if(!S)return;
+ S.turns.forEach((t,i)=>{const u=document.createElement('div');u.className='msg user';const uw=document.createElement('div');uw.className='who';const you=document.createElement('span');you.textContent='You';const sp=document.createElement('span');sp.className='sp';const ed=document.createElement('button');ed.textContent='Edit & resend';ed.disabled=busy;ed.onclick=()=>editFrom(i);uw.append(you,sp,copyBtn(t.user),ed);u.append(uw,rich(t.user));h.append(u);
+  const m=document.createElement('div');m.className='msg';const mw=document.createElement('div');mw.className='who';const me=document.createElement('span');me.textContent=L.them;const sp2=document.createElement('span');sp2.className='sp';const se=document.createElement('button');se.textContent='Request';se.title='Exactly what the context plugin handed the model adapter on this turn';se.onclick=()=>sent(i);mw.append(me,sp2,copyBtn(shown(t.reply||L.silence)),se);if(i===S.turns.length-1){mw.append(copyBtn(`You:
+${t.user}
+
+${L.them}:
+${shown(t.reply||L.silence)}
+
+${metaText(t)}`,'Copy full turn'));const rg=document.createElement('button');rg.textContent='Regenerate';rg.disabled=busy;rg.onclick=()=>act('/api/regenerate',{});mw.append(rg);}
+  const meta=document.createElement('div');meta.className='meta';meta.textContent=metaText(t);m.append(mw,rich(shown(t.reply||L.silence)));if(t.review){const rv=document.createElement('div');rv.className='review';rv.style.cssText='margin:8px 0;padding:8px 10px;border-left:3px solid #999;white-space:pre-wrap;font-size:.92em';const rh=document.createElement('strong');rh.textContent='Review (outside the scene)';rv.append(rh,document.createTextNode('\n'+t.review));m.append(rv);}m.append(meta);h.append(m);});
+ if(PENDING){const u=document.createElement('div');u.className='msg user';const uw=document.createElement('div');uw.className='who';const you=document.createElement('span');you.textContent='You';uw.append(you);u.append(uw,rich(PENDING));h.append(u);}
+ h.scrollTop=h.scrollHeight;$('effort').value=S.effort;}
+async function load(id){if(busy)return;busy=true;renderChat();try{S=await api('/api/load',{id});localStorage.setItem('labSession',S.id);}finally{busy=false;$('sessions').value=S?.id||'';renderChat();}}
+async function refresh(keep){const d=await api('/api/state');P=d.plugin;L={...L,...(P.labels||{})};$('partsNote').textContent=P.parts_note||'';$('memories').hidden=!P.view_label;if(P.view_label)$('memories').textContent=P.view_label;{const fill=(sel,list,dflt)=>{const was=sel.value;sel.replaceChildren(...list.map(v=>new Option(v,v)));sel.value=list.includes(was)?was:(list.includes(dflt)?dflt:(list[0]??''));};fill($('model'),d.models,d.defaultModel);fill($('effort'),d.efforts,d.defaultEffort);}
+ $('storageWarning').textContent=[d.unavailableSessions?.length?`${d.unavailableSessions.length} saved conversation(s) could not be read. Their files have been kept in data/sessions.`:'',d.unfinishedCreates?.length?`${d.unfinishedCreates.length} new conversation(s) failed while the plugin was creating them. Their records are kept in data/pending for the plugin owner to check.`:''].filter(Boolean).join(' ');
+ if(!keep){C=d.config;SAVED=JSON.stringify(C);renderCfg();}else SAVED=JSON.stringify(d.config);
+ $('versions').replaceChildren(new Option('Load a version…',''));for(const v of d.history.slice().reverse())$('versions').add(new Option(v.replace('.json',''),v));
+ $('importRow').hidden=!(P.imports||[]).includes('character_card')&&!(P.exports||[]).includes('character_card');$('importCard').hidden=!(P.imports||[]).includes('character_card');$('exportCard').hidden=!(P.exports||[]).includes('character_card');$('cmpBox').hidden=!!d.stateful;
+ for(const [id,pick] of [['cmpA',1],['cmpB',2]]){const sel=$(id),was=sel.value;sel.replaceChildren();for(const v of d.history.slice().reverse())sel.add(new Option(v.replace('.json',''),v));sel.value=was&&d.history.includes(was)?was:(d.history[d.history.length-pick]||d.history[d.history.length-1]||'');}
+ $('sessions').replaceChildren(new Option('Choose…',''));for(const s of d.sessions)$('sessions').add(new Option(`${s.created} · ${s.turns}t`,s.id));if(S)$('sessions').value=S.id;return d;}
+function thinking(on){$('thinking').textContent=on?L.thinking:'';}
+function sessionBasis(session){return {turns:session.turns.map(t=>t.requestId),discarded:session.discarded.map(b=>b.state??null),prompt:session.prompt,effort:session.effort};}
+async function act(path,extra){
+ if(busy||!S)return false;
+ const id=S.id,basis=sessionBasis(S);
+ const requestId=path==='/api/turn'?crypto.randomUUID().replaceAll('-',''):undefined;
+ busy=true;err();thinking(true);renderChat();let ok=true;
+ try{S=await api(path,{id,basis,...extra,...(requestId?{requestId}:{})});}
+ catch(e){
+  ok=false;
+  try{
+   S=await api('/api/load',{id});
+   // A lost HTTP reply can follow a successful save. Only our exact request id,
+   // not matching words or a changed turn count, proves that this Send completed.
+   if(requestId&&S.turns.some(t=>t.requestId===requestId&&t.user===extra.message))ok=true;
+  }catch{}
+  if(!ok)err(e);
+ }finally{busy=false;PENDING=null;thinking(false);renderChat();refresh(true).catch(err);}
+ return ok;
+}
+$('new').onclick=async()=>{if(busy)return;if(JSON.stringify(C)!==SAVED&&!confirm('The editor has unsaved edits. New conversations use the SAVED prompt. Continue?'))return;try{err();busy=true;renderChat();thinking(false);$('thinking').textContent='Setting up…';S=await api('/api/new',{model:$('model').value,effort:$('effort').value});localStorage.setItem('labSession',S.id);}catch(e){err(e)}finally{busy=false;PENDING=null;thinking(false);renderChat();refresh(true).catch(err);$('message').focus();}};
+$('sessions').onchange=()=>{if($('sessions').value)load($('sessions').value).catch(err);};
+$('adopt').onclick=()=>act('/api/adopt',{});$('effort').onchange=()=>{if(S)act('/api/effort',{effort:$('effort').value});};
+// A context plugin's display script may add its own lines under the View panel (window.labDisplay.viewExtra(view) -> text).
+function viewExtra(d){try{return window.labDisplay&&typeof window.labDisplay.viewExtra==='function'?String(window.labDisplay.viewExtra(d)||''):'';}catch(e){return '\n\n(display script error: '+e.message+')';}}
+$('memories').onclick=async()=>{if(!S)return;try{const d=await api('/api/view',{id:S.id});show(`${P.view_title||'State'} · ${d.records.length} records, ${d.stored} turns stored`,(d.records.map(r=>`Turn ${r.turn}\n${r.text}`).join('\n\n')||'None yet.')+(d.selection?`
+
+— Last turn's memory selection (${d.selection.plugin}, ${d.selection.order}${d.selection.links?' · links '+(d.selection.links==='none'?'off':'on'):''}): ${d.selection.mounted} of ${d.selection.candidates} accounts mounted
+`+d.selection.items.map(i=>`turn ${i.turn}: ${i.because}`).join('\n'):'')+viewExtra(d));}catch(e){err(e)}};
+function transcriptText(){if(!S||!S.turns.length)return 'No turns yet.';return S.turns.map((t,i)=>`Turn ${i+1}\n\nYou:\n${t.user}\n\n${L.them}:\n${shown(t.reply||L.silence)}${t.review?`\n\nReview (outside the scene):\n${t.review}`:''}\n\n${metaText(t)}`).join('\n\n---\n\n');}
+$('copyAllSlot').append(copyBtn(transcriptText,'Copy transcript'));async function fullTranscript(session=S){if(!session)throw new Error('No conversation open.');const cfg=session.config||{};const settings=Object.entries(cfg).filter(([k])=>!['parts','note'].includes(k)).map(([k,v])=>`  ${k}: ${typeof v==='string'?v:JSON.stringify(v)}`).join('\n');const parts=(cfg.parts||[]).map(p=>`  [${p.enabled?'on ':'off'}] ${p.name} (${p.role}${p.when==='opening'?', turn 1 only':''}, ${(p.text||'').length} chars)`).join('\n');const rec=t=>Object.entries(t).filter(([k])=>!['user','reply'].includes(k)).map(([k,v])=>`  ${k}: ${typeof v==='string'?v:JSON.stringify(v)}`).join('\n');const turns=session.turns.map((t,i)=>`----- Turn ${i+1} -----\n\nYou:\n${t.user}\n\n${L.them}:\n${t.reply||L.silence}\n\nRecord:\n${rec(t)}`).join('\n\n');const dropped=(session.discarded||[]).map((b,j)=>`Dropped set ${j+1}:\n`+b.turns.map(t=>`You:\n${t.user}\n\n${L.them}:\n${t.reply||L.silence}\n\nRecord:\n${rec(t)}`).join('\n\n')).join('\n\n');const fails=(session.failures||[]).map(f=>JSON.stringify(f)).join('\n');let prompt='';try{prompt=(await api('/api/preview',{config:cfg})).text;}catch(e){prompt='(could not assemble: '+e.message+')';}const seen=new Map();const sent=[];for(let i=0;i<session.turns.length;i++){let r;try{r=await api('/api/sent',{id:session.id,index:i,requestId:session.turns[i].requestId});}catch(e){sent.push(`----- Turn ${i+1}: exactly what the context plugin sent to the model adapter -----\n(not available: ${e.message})`);continue;}const ms=(r.messages||[]).map((m,j)=>{const key=m.role+'\u0000'+m.content;const head=`===== ${m.role.toUpperCase()} (message ${j+1}, ${m.content.length} chars) =====`;if(seen.has(key))return `${head}\n[identical to ${seen.get(key)}]`;seen.set(key,`turn ${i+1}, message ${j+1}`);return `${head}\n${m.content}`;});const extra=Object.keys(r).filter(k=>k!=='messages').map(k=>`${k}: ${JSON.stringify(r[k])}`).join('\n');sent.push(`----- Turn ${i+1}: exactly what the context plugin sent to the model adapter -----\n`+ms.join('\n\n')+(extra?`\n\n${extra}`:''));}return ['COMPANION LAB · FULL TRANSCRIPT',`conversation ${session.id}`,`created ${session.created}`,`model ${session.model} · effort ${session.effort} · prompt ${session.prompt}`,`saved ${new Date().toString()}`,'','===== SETTINGS =====',settings||'  (none)','','===== PARTS =====',parts||'  (none)','',`===== TURNS (${session.turns.length}) =====`,'',turns||'No turns yet.','',`===== DROPPED TURNS (${(session.discarded||[]).length}) =====`,dropped||'None.','',`===== FAILURES (${(session.failures||[]).length}) =====`,fails||'None.','','===== EXACTLY WHAT WAS SENT, EVERY TURN (repeated messages referenced, not repeated) =====','',sent.join('\n\n')||'No turns yet.','','===== PROMPT THIS CONVERSATION RUNS ON (assembled from its config) =====',prompt].join('\n');}{const b=document.createElement('button');b.id='saveFull';b.textContent='Save full transcript';b.title='Download this conversation: every turn and its record, exactly what the context plugin sent to the model adapter each turn, dropped turns, failures, and its assembled prompt';b.onclick=async()=>{try{const session=S;download('full transcript',await fullTranscript(session),session.id);}catch(e){err(e)}};$('copyAllSlot').append(b);}
+if(window.labDisplay){$('marksBox').hidden=false;$('marksBox').title=window.labDisplay.hint||'';$('marksLabel').textContent=window.labDisplay.label;}$('marks').checked=SHOW_MARKS;$('marks').onchange=()=>{SHOW_MARKS=$('marks').checked;try{localStorage.setItem('marks',SHOW_MARKS?'on':'off');}catch{}renderChat();};
+$('dropped').onclick=()=>{if(!S)return;const list=S.discarded||[];show('Dropped turns',list.length?'':'None.');const live=S.turns.map(t=>t.requestId);list.forEach((b,pos)=>{const text=b.turns.map(t=>`YOU\n${t.user}\n\n${L.them.toUpperCase()}\n${shown(t.reply)}\n\n${metaText(t)}`).join('\n\n');const head=document.createElement('div');head.className='row';head.style.margin='14px 0 6px';const lab=document.createElement('strong');lab.textContent=`Dropped ${b.at}`;head.append(lab,copyBtn(text));const can=b.state&&b.prefix&&b.prefix.length<=live.length&&b.prefix.every((id,k)=>id===live[k]);if(can){const r=document.createElement('button');r.textContent=b.turns.length>1?`Restore these ${b.turns.length} turns`:'Restore this turn';r.title='Makes this the live version, with its memories. What is live now moves to Dropped turns.';r.disabled=busy;r.onclick=()=>{$('dlg').close();act('/api/restore',{index:pos});};head.append(r);}else{const n=document.createElement('span');n.className='meta';n.textContent=b.state?'Read only: the conversation before it has changed.':'Read only: dropped before restore existed.';head.append(n);}const body=document.createElement('div');body.append(rich(text));$('dlgBody').append(head,body);});};
+async function sent(i){try{const session=S;const r=await api('/api/sent',{id:session.id,index:i,requestId:session.turns[i].requestId});show(`Exactly what the context plugin sent to the model adapter, turn ${i+1}`,r.messages.map(m=>`===== ${m.role.toUpperCase()} =====\n${m.content}`).join('\n\n'));}catch(e){err(e)}}
+async function send(){const message=$('message').value.trim();if(!message||busy||!S)return;$('message').value='';PENDING=message;const ok=await act('/api/turn',{message});PENDING=null;if(!ok&&!$('message').value)$('message').value=message;$('message').focus();}
+async function editFrom(i){const t=S.turns[i];if(!confirm('Drop this turn and everything after it, and put your message back in the box? Dropped turns are kept.'))return;if(await act('/api/rewind',{index:i})){$('message').value=t.user;$('message').focus();}}
+$('send').onclick=send;$('message').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}});
+window.addEventListener('beforeunload',e=>{if(C&&JSON.stringify(C)!==SAVED){e.preventDefault();e.returnValue='';}});
+refresh().then(async d=>{const want=localStorage.getItem('labSession');if(want&&d.sessions.some(s=>s.id===want))await load(want);else renderChat();}).catch(err);
+</script></html>
