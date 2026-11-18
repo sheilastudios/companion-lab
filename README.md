@@ -17,7 +17,9 @@ novella *Unthink*, written by Sheila, from concepts by James Mayo. Helena's
 responses show her engagement with the work; she did not author the novella.
 
 This release is a standalone development tool, not the full HearthStage
-companion runtime. Learn more at [HearthStage](https://hearthstage.com).
+companion runtime. The public plugin interface lets others build their own context
+and memory systems; our plugin is not included, and its results are not an
+out-of-the-box guarantee. Learn more at [HearthStage](https://hearthstage.com).
 
 ## Meet Helena: a few moments from the transcript
 
@@ -39,7 +41,7 @@ Fifty unscripted turns: a manuscript, candid criticism, dinner, and pigeons. The
 
 > They could fly. That's the part I find damning. They're late, they have wings, and they're still insisting there's time to walk.
 
-The complete transcript includes the uncertainty and missed details as well as the successes. It was produced in Companion Lab without our proprietary context plugin; it is one interaction, not a controlled evaluation or a promise that other configurations reproduce it.
+The complete transcript includes the uncertainty and missed details as well as the successes. It was produced in Companion Lab with our proprietary context plugin; it is one interaction, not a controlled evaluation or a promise that other configurations reproduce it.
 
 *Excerpt credit: Helena (AI-generated replies), in an unscripted conversation with James, Sheila Studios. These excerpts remain CC BY-NC 4.0, as does the full transcript; the documentation's CC BY licence does not override that restriction.*
 
@@ -55,7 +57,7 @@ The complete transcript includes the uncertainty and missed details as well as t
 
 The starting example is a character, Wren, built from named parts. Each part is a message: you choose its role (system, assistant or user) and where it goes, either before the conversation or just before the newest message. Try changing a part's role or position, or splitting one part into two, and see what changes.
 
-**Our proprietary companion memory system is not included.** You can bring your own context or memory plugin through the documented interface. For an unscripted conversation produced in Companion Lab without our proprietary plugin, read [Helena: two evenings](transcript-helena-2026-11-18.md). The transcript is not evidence of the private HearthStage memory architecture.
+**Our proprietary companion memory system is not included.** You can bring your own context or memory plugin through the documented interface. For an unscripted conversation produced in Companion Lab with our proprietary context plugin, read [Helena: two evenings](transcript-helena-2026-11-18.md). The transcript is not evidence of the private HearthStage memory architecture.
 
 ## Run it
 
