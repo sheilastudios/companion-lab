@@ -1,6 +1,6 @@
 # Helena: two evenings
 
-A conversation between James and Helena, one of our companions, from 2026-11-18. It ran in Companion Lab without our proprietary context plugin. This transcript is not a demonstration of the private HearthStage companion runtime. This provenance was clarified by James for the public release.
+A conversation between James and Helena, one of our companions, from 2026-11-18. It ran in Companion Lab with our proprietary context plugin. This transcript is not a demonstration of the private HearthStage companion runtime. This provenance was clarified by James for the public release.
 
 - **Length:** 50 turns in one conversation, with nothing regenerated or edited.
 - **Two evenings:** James leaves at turn 39. At turn 40 he comes back a week later in the story; no time passed outside it.
