@@ -2,7 +2,7 @@
 
 A local lab for finding out what your prompts and your memory system actually do.
 
-**What this is:** the public version of the lab we use to build companions. It ships with a basic plugin that sends standard chat turns. **What it isn't:** our companion system. Our context plugin, prompts and memory architecture are proprietary and aren't included. The included Helena transcript was produced in Companion Lab without our proprietary context plugin; it is not a demonstration of the private HearthStage runtime.
+**What this is:** the public version of the lab we use to build companions. It ships with a basic plugin that sends standard chat turns. **What it isn't:** our companion system. Our context plugin, prompts and memory architecture are proprietary and aren't included. The included Helena transcript was produced in Companion Lab with our proprietary context plugin; it is not a demonstration of the private HearthStage runtime.
 
 ## Built while developing HearthStage
 
