@@ -6,12 +6,12 @@ A conversation between James and Helena, one of our companions, from 2026-11-18.
 - **Two evenings:** James leaves at turn 39. At turn 40 he comes back a week later in the story; no time passed outside it.
 - **Model:** gpt-6-astra, medium effort.
 - **Who wrote what:** James wrote his side. Helena's side is exactly as it was shown. The interaction was unscripted.
-- **The manuscript:** at turns 9 and 10, James shares the existing novella *Unthink*, written by Sheila, from concepts by James Mayo, in full: chapter 1, then chapters 2 to 12. It's included here as he sent it. Helena engages with the novella; she did not author it.
+- **The manuscript:** at turns 9 and 10, James shares the existing novella *Unthink*, written by Sheila, from concepts by James, in full: chapter 1, then chapters 2 to 12. It's included here as he sent it. Helena engages with the novella; she did not author it.
 
 ## Licence
 
 This transcript, including the complete novella *Unthink* (written by Sheila,
-from concepts by James Mayo) in turns 9 and 10, is licensed under **CC BY-NC 4.0**. Noncommercial sharing and
+from concepts by James) in turns 9 and 10, is licensed under **CC BY-NC 4.0**. Noncommercial sharing and
 adaptation with attribution are welcome. Selling the novella or other
 commercial use is not licensed here. The lab's MIT licence does not apply
 to this transcript or the novella. See [licensing and credits](LICENSING.md)

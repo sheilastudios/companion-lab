@@ -13,7 +13,7 @@ with AI companions.
 We're releasing it so others can experiment with their own prompts, inspect
 interactions, and compare results. The included Helena transcript records an
 unscripted interaction, not just selected highlights. James shared the existing
-novella *Unthink*, written by Sheila, from concepts by James Mayo. Helena's
+novella *Unthink*, written by Sheila, from concepts by James. Helena's
 responses show her engagement with the work; she did not author the novella.
 
 This release is a standalone development tool, not the full HearthStage

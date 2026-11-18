@@ -28,8 +28,8 @@ endorsement. The full legal texts govern:
 ## How to credit
 
 - Lab and documentation: "Companion Lab — Sheila Studios (James and AI collaborators), https://sheilastudios.com." For code, retain the MIT copyright and permission notice.
-- Novella: "Unthink — written by Sheila, from concepts by James Mayo. Released by Sheila Studios under CC BY-NC 4.0."
-- Transcript: "Helena: two evenings — James and Helena (AI companion), Sheila Studios, 2026-11-18. CC BY-NC 4.0." James wrote his messages and shared the existing novella Unthink, written by Sheila from concepts by James Mayo; Helena's responses are AI-generated. The interaction was unscripted. Helena engaged with the novella; she did not author it.
+- Novella: "Unthink — written by Sheila, from concepts by James. Released by Sheila Studios under CC BY-NC 4.0."
+- Transcript: "Helena: two evenings — James and Helena (AI companion), Sheila Studios, 2026-11-18. CC BY-NC 4.0." James wrote his messages and shared the existing novella Unthink, written by Sheila from concepts by James; Helena's responses are AI-generated. The interaction was unscripted. Helena engaged with the novella; she did not author it.
 
 When distributing a copy, retain its source link (the release URL when
 available, or https://sheilastudios.com), the applicable licence link, and
