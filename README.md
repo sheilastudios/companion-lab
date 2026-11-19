@@ -113,9 +113,9 @@ In the Lab drawer, **Side by side** sends one message under two saved prompt ver
 - both prompt versions, as they were used;
 - the result.
 
-`packet.json` lists each file with its SHA-256. It names any file the comparison never wrote: a side whose plugin failed has no request or reply, and older comparisons have no prompt versions. It also carries fingerprints of the lab, plugin and adapter code, taken when the comparison ran, and states exactly which files they cover.
+`packet.json` lists each file with its SHA-256, and names any file the comparison never saved. For example, a side whose plugin failed while assembling its request has no request or reply, and older comparisons have no prompt versions. It also carries fingerprints of the lab, plugin and adapter code, states exactly which files they cover, and says whether they are certain: they're taken from disk just before the comparison runs and checked again after, and any file that changed in between, or couldn't be read, is named.
 
-The packet leaves out the endpoint address and any key, and it reduces provider error messages to their codes (`HTTP 401`, for example). The lab's own `data/compares/` keeps the full originals. The message, prompts and replies go in as written, and can hold anything you or the model wrote, so read a packet before you share it. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
+The packet leaves out the endpoint address and any key, and it reduces every error to a short code (`HTTP 401`, for example), whatever shape the adapter reported it in. The lab's own `data/compares/` keeps the full originals. The message, prompts and replies go in as written, and can hold anything you or the model wrote, so read a packet before you share it. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
 
 ## Test it
 

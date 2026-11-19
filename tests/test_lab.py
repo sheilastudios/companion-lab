@@ -96,6 +96,110 @@ def no_retry_check():
             server.wait()
 
 
+def provenance_check():
+    """Side by side with an adapter of its own, outside the lab folder. Its second call changes a file beside it, and another file there
+    is locked, so the code record must name both, say it is uncertain, and still save the comparison. Its failures come back as
+    structured objects quoting a key and an address, which a packet must reduce to codes."""
+    port = free_port()
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp) / 'my-adapter'
+        folder.mkdir()
+        helper, locked, count = folder / 'helper.txt', folder / 'locked.txt', folder / 'count.txt'
+        helper.write_text('version 1\n', encoding='utf-8')
+        locked.write_text('held open\n' * 100, encoding='utf-8')
+        script = folder / 'adapter.py'
+        script.write_text(
+            'import json, sys\n'
+            'x = json.load(sys.stdin)\n'
+            "if x['op'] == 'discover':\n"
+            "    print(json.dumps(dict(ok=True, models=['fake-model'])))\n"
+            '    sys.exit()\n'
+            f"open({str(count)!r}, 'a').write('x')\n"
+            f"n = len(open({str(count)!r}).read())\n"
+            f"if n == 2: open({str(helper)!r}, 'a').write('version 2\\n')\n"
+            "if x['request']['messages'][-1]['content'] == 'Fail':\n"
+            "    print(json.dumps(dict(ok=False, retry=False, error=dict(code='invalid_api_key', message='Rejected key sk-test-structured at http://10.7.7.7/v1'),\n"
+            "                          detail='Rejected key sk-test-structured', extra=dict(endpoint='http://10.7.7.7/v1'))))\n"
+            'else:\n'
+            "    print(json.dumps(dict(ok=True, content='Fine.', finish_reason='stop', model='/home/someone/models/secret-path/qwen.gguf',\n"
+            "                          usage=dict(prompt_tokens=5, completion_tokens=1, note='sk-test-structured'))))\n",
+            encoding='utf-8')
+        cfg = Path(tmp) / 'config.json'
+        cfg.write_text(json.dumps(dict(context='plugins/turns', model=dict(command=[sys.executable, '-B', str(script)], models=['fake-model'], default_model='fake-model', efforts=['default'], default_effort='default', retry_seconds=0))), encoding='utf-8')
+        server = subprocess.Popen([sys.executable, '-X', 'utf8', '-B', str(ROOT / 'lab_server.py')], cwd=ROOT, env=dict(os.environ, LAB_CONFIG=str(cfg), LAB_DATA=str(Path(tmp) / 'data'), LAB_PORT=str(port)), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        base = f'http://127.0.0.1:{port}'
+        lock = None
+        try:
+            def post(path, body, raw=False):
+                req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'X-Companion-Lab': '1'})
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        return r.read() if raw else json.load(r)
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return dict(http_error=e.code, **json.loads(e.read() or b'{}'))
+            for _ in range(50):
+                try:
+                    get_json(base + '/api/state', timeout=2)
+                    break
+                except Exception:
+                    time.sleep(0.2)
+            state = get_json(base + '/api/state')
+            post('/api/prompt/save', dict(config=state['config']))
+            saved = state['config']
+            saved['parts'][0]['text'] = 'Another version. ' + saved['parts'][0]['text']
+            post('/api/prompt/save', dict(config=saved))
+            h = get_json(base + '/api/state')['history']
+            # Lock the file for the whole run so the lab cannot read it (a byte-range lock on Windows; no read permission elsewhere).
+            if os.name == 'nt':
+                import msvcrt
+                lock = open(locked, 'r+b')
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, locked.stat().st_size)
+            else:
+                os.chmod(locked, 0)
+            r = post('/api/compare', dict(a=h[-1], b=h[-2], message='Hello', model='fake-model', effort='default'))
+            folder_data = Path(tmp) / 'data' / 'compares' / r.get('id', 'none')
+            check('a comparison is saved whole even when a code file cannot be read', r.get('a', {}).get('text') == 'Fine.' and r.get('b', {}).get('text') == 'Fine.'
+                  and (folder_data / 'result.json').exists(), r)
+            status = r.get('codeStatus', {})
+            changed, unreadable = status.get('changedDuringRun', []), status.get('unreadable', [])
+            check('a file that changed during the run is named, and the record is marked uncertain',
+                  any(n.endswith('/helper.txt') and n.startswith('external/') for n in changed) and status.get('certain') is False and 'uncertain' in status.get('note', ''), status)
+            check('a file that could not be read is named, by a portable name with no local path',
+                  (os.name != 'nt' and os.geteuid() == 0) or any(n.endswith('/locked.txt') for n in unreadable), status)
+            check('code names outside the lab hide their folder', all(not n.startswith(('/', 'C:', 'c:')) and str(tmp) not in n for n in r.get('code', {})), r.get('code'))
+            packet = post('/api/compare/export', dict(id=r['id']), raw=True)
+            z = zipfile.ZipFile(io.BytesIO(packet)) if isinstance(packet, bytes) else None
+            pk = json.loads(z.read(f"{r['id']}/packet.json")) if z else {}
+            check('the packet carries the uncertain code status', pk.get('codeStatus', {}).get('certain') is False, pk.get('codeStatus') or packet)
+            served = pk.get('sides', {}).get('a', {}).get('adapter', {})
+            check('a served model reported as a file path keeps only its name, and usage keeps only numbers',
+                  served.get('model') == 'qwen.gguf' and served.get('usage') == dict(prompt_tokens=5, completion_tokens=1), served)
+            whole = b''.join(z.read(n) for n in z.namelist()) if z else b''
+            check('no local path from the endpoint reaches the packet', b'secret-path' not in whole and b'someone' not in whole and str(tmp).encode() not in whole)
+
+            fail = post('/api/compare', dict(a=h[-1], b=h[-2], message='Fail', model='fake-model', effort='default'))
+            check('the lab keeps a structured failure in full locally', b'sk-test-structured' in (Path(tmp) / 'data' / 'compares' / fail['id'] / 'reply-a.json').read_bytes(), fail)
+            packet = post('/api/compare/export', dict(id=fail['id']), raw=True)
+            fz = zipfile.ZipFile(io.BytesIO(packet)) if isinstance(packet, bytes) else None
+            fwhole = b''.join(fz.read(n) for n in fz.namelist()) if fz else b''
+            fp = json.loads(fz.read(f"{fail['id']}/packet.json")) if fz else {}
+            side = fp.get('sides', {}).get('a', {})
+            check('a structured adapter error goes into the packet as its code only',
+                  fz is not None and b'sk-test-structured' not in fwhole and b'10.7.7.7' not in fwhole and b'Rejected key' not in fwhole
+                  and side.get('error') == 'invalid_api_key' and side.get('adapter', {}).get('error') == 'invalid_api_key'
+                  and all(a['error'] == 'invalid_api_key' for a in side.get('adapter', {}).get('attempts', [])) and 'extra' not in side.get('adapter', {}), fp.get('sides') or packet)
+        finally:
+            if lock:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, locked.stat().st_size)
+                lock.close()
+            elif os.name != 'nt':
+                os.chmod(locked, 0o644)
+            server.kill()
+            server.wait()
+
+
 def main():
     fake = ThreadingHTTPServer(('127.0.0.1', 0), FakeModel)
     threading.Thread(target=fake.serve_forever, daemon=True).start()
@@ -271,7 +375,8 @@ def main():
                 recorded = json.loads((data_dir / 'result.json').read_text(encoding='utf-8'))
                 check('code fingerprints are the ones recorded when the comparison ran, with their scope',
                       pk['code'] == recorded['code'] and {'lab_server.py', 'models/openai_compatible/adapter.py', 'plugins/turns/plugin.py', 'plugins/turns/plugin.json'} <= set(pk['code'])
-                      and pk['codeScope'] and pk['adapter'] == 'models/openai_compatible/adapter.py', pk.get('code'))
+                      and pk['codeScope'] and pk['adapter'] == 'models/openai_compatible/adapter.py'
+                      and pk['codeStatus']['certain'] is True and pk['codeStatus']['changedDuringRun'] == [] and pk['codeStatus']['unreadable'] == [], (pk.get('code'), pk.get('codeStatus')))
                 whole = b''.join(z.read(n) for n in z.namelist())
                 check('the endpoint address and key are not in the packet', b'127.0.0.1' not in whole and b'LAB_TEST_KEY' not in whole and b'test-key-value' not in whole)
             bad_id = post_raw(dict(id='../sessions'))
@@ -410,6 +515,7 @@ def main():
     fake.shutdown()
     fake.server_close()
     no_retry_check()
+    provenance_check()
     print(f'{sum(results)}/{len(results)} passed')
     return 0 if all(results) else 1
 

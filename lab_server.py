@@ -329,6 +329,10 @@ def compare(b):
     for i, cfg in enumerate(cfgs):
         write(DATA / 'compares' / cid / f'prompt-{"ab"[i]}.json', cfg)
     out = [None, None]
+    # The plugin and adapter run as new processes for each call, so their code is read from disk then. Fingerprint it before the
+    # first side and again after the last: if anything changed in between, which version each side ran is uncertain, and the record
+    # says so. Taking fingerprints never fails a comparison.
+    before = code_snapshot()
 
     def side(i):
         cfg = cfgs[i]
@@ -352,80 +356,176 @@ def compare(b):
     # (or three with a turn) can collide. Side by side runs under the same lock as a turn.
     side(0)
     side(1)
-    # The code that produced this comparison is fingerprinted now, when it ran, so a packet exported later still describes it.
+    after = code_snapshot()
     result = dict(id=cid, at=time.strftime('%Y-%m-%d %H:%M:%S'), message=message, model=b['model'], effort=b['effort'], plugin=PLUGIN.get('id'), continued=b.get('id') or None,
-                  history_turns=len(turns), a=out[0], b=out[1], adapter=adapter_id(), code=code_files(), codeScope=CODE_SCOPE)
+                  history_turns=len(turns), a=out[0], b=out[1], adapter=adapter_id(), **code_record(before, after))
     write(DATA / 'compares' / cid / 'result.json', result)
     return result
 
 
-CODE_SCOPE = ('lab_server.py, every file in the context plugin\'s folder, and every file in the folder of each script the model adapter\'s '
-              'command names (so an adapter\'s own imports in that folder are covered). Shared code outside those folders, the Python '
-              'or Node runtime, and the model endpoint are not covered.')
+CODE_SCOPE = ('lab_server.py as this lab process loaded it; plugin.json and every file in the context plugin\'s folder; and every script '
+              'the plugin\'s or model adapter\'s command names, with every file in that script\'s folder (so an adapter\'s own imports '
+              'there are covered). Shared code outside those folders, the Python or Node runtime, and the model endpoint are not covered.')
 CODE_SKIP = {'__pycache__', 'node_modules', '.git'}
 CODE_MAX = 200
+# The lab's own code as this process loaded it. Its file on disk can change after the lab starts; the record uses what is running.
+LAB_SOURCE_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def code_name(f):
+    """A portable, unique name for a fingerprinted file: its path relative to the lab, or, for a file elsewhere, external/ plus a short
+    hash of its folder and its file name, so two outside files with the same name never collapse and no local path is shown."""
+    root = ROOT.resolve()
+    if f.is_relative_to(root):
+        return f.relative_to(root).as_posix()
+    return f'external/{hashlib.sha256(str(f.parent).encode()).hexdigest()[:8]}/{f.name}'
+
+
+def script_paths():
+    """The scripts the plugin's and adapter's commands name, as resolved files."""
+    out = []
+    for cmd, cwd in ((PLUGIN['command'], PLUGIN_DIR), (MODEL.get('command', []), MODEL_DIR)):
+        for a in cmd[1:]:
+            if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a) and (cwd / a).is_file():
+                out.append((cwd / a).resolve())
+    return out
 
 
 def adapter_id():
-    """The model adapter as a portable name: its script relative to the lab, or only the file name when it lives elsewhere."""
-    scripts = [MODEL_DIR / a for a in MODEL.get('command', [])[1:] if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a)]
-    if not scripts:
-        return None
-    f = scripts[-1].resolve()
-    return f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.name
+    """The model adapter as a portable name (code_name of its script)."""
+    adapter = [(MODEL_DIR / a).resolve() for a in MODEL.get('command', [])[1:] if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a)]
+    return code_name(adapter[-1]) if adapter else None
 
 
-def code_files():
-    """The code that ran, by file and SHA-256, within CODE_SCOPE. Recorded with each comparison when it runs."""
-    found = {ROOT / 'lab_server.py'}
-    folders = {PLUGIN_DIR}
-    for cmd, cwd in ((PLUGIN['command'], PLUGIN_DIR), (MODEL['command'], MODEL_DIR)):
-        for a in cmd[1:]:
-            if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a) and (cwd / a).is_file():
-                script = (cwd / a).resolve()
-                found.add(script)
-                # A script directly in the lab's own folder covers only itself: the lab folder holds data and everything else.
-                if script.parent != ROOT.resolve():
-                    folders.add(script.parent)
-    data = DATA.resolve()
-    for folder in folders:
-        for candidate in folder.rglob('*'):
-            if candidate.is_file() and not CODE_SKIP & set(candidate.parts) and not candidate.resolve().is_relative_to(data) and candidate.suffix not in ('.pyc', '.log'):
-                found.add(candidate)
-    out = {}
-    for f in sorted({p.resolve() for p in found if p.is_file()})[:CODE_MAX]:
-        name = f.relative_to(ROOT.resolve()).as_posix() if f.is_relative_to(ROOT.resolve()) else f.name
-        out[name] = hashlib.sha256(f.read_bytes()).hexdigest()
-    return out
+def code_snapshot():
+    """Fingerprints of the plugin and adapter code on disk now, within CODE_SCOPE. Never raises: a file that can't be read is listed
+    under unreadable, and files past CODE_MAX are counted under omitted. The command scripts and plugin.json always come first."""
+    try:
+        root, data = ROOT.resolve(), DATA.resolve()
+        required = [p for p in [(PLUGIN_DIR / 'plugin.json').resolve(), *script_paths()] if p.is_file()]
+        folders = {PLUGIN_DIR.resolve()} | {s.parent for s in required if s.parent != root}
+        extra = set()
+        for folder in folders:
+            try:
+                for candidate in folder.rglob('*'):
+                    if candidate.is_file() and not CODE_SKIP & set(candidate.parts) and candidate.suffix not in ('.pyc', '.log') and not candidate.resolve().is_relative_to(data):
+                        extra.add(candidate.resolve())
+            except OSError:
+                pass
+        ordered = list(dict.fromkeys(required)) + sorted(extra - set(required))
+        files, unreadable = {}, []
+        for f in ordered[:max(CODE_MAX, len(required))]:
+            try:
+                files[code_name(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                unreadable.append(code_name(f))
+        return dict(files=files, unreadable=unreadable, omitted=max(0, len(ordered) - max(CODE_MAX, len(required))))
+    except Exception:
+        return dict(files={}, unreadable=[], omitted=0, failed=True)
+
+
+def code_record(before, after):
+    """The code fields saved with a comparison: the fingerprints taken before it ran, and an honest account of how far they go."""
+    changed = sorted(n for n in set(before['files']) | set(after['files']) if before['files'].get(n) != after['files'].get(n))
+    try:
+        lab_on_disk = hashlib.sha256((ROOT / 'lab_server.py').read_bytes()).hexdigest()
+    except OSError:
+        lab_on_disk = None
+    status = dict(taken='Plugin and adapter files: read from disk just before the first side ran, and checked again after the last side. '
+                        'lab_server.py: the code this lab process loaded.',
+                  changedDuringRun=changed, unreadable=sorted(set(before['unreadable']) | set(after['unreadable'])),
+                  omitted=before['omitted'], labChangedOnDiskSinceStart=lab_on_disk != LAB_SOURCE_SHA,
+                  certain=not changed and not before.get('failed') and not after.get('failed'))
+    if before.get('failed') or after.get('failed'):
+        status['note'] = 'Fingerprints could not be taken for this comparison.'
+    elif changed:
+        status['note'] = ('Files changed on disk while this comparison ran, so which version each side ran is uncertain. '
+                          'The fingerprints are from before the first side.')
+    return dict(code={'lab_server.py': LAB_SOURCE_SHA, **before['files']}, codeScope=CODE_SCOPE, codeStatus=status)
 
 
 # A packet carries only the files the lab writes for a comparison, read only from that comparison's own folder.
 PACKET_MEMBERS = ('result.json', 'prompt-a.json', 'prompt-b.json', 'request-a.json', 'request-b.json', 'reply-a.json', 'reply-b.json')
-# What a packet keeps of an adapter reply. Anything else an adapter adds stays in the lab's local copy.
-REPLY_KEEP = ('ok', 'content', 'finish_reason', 'model', 'usage', 'addedToRequest', 'retry')
 
 
-def error_code(value):
-    """A diagnostic reduced to its code. Provider error bodies and exception text can carry a rejected key or a private address, so a
-    packet never includes them: 'HTTP 401: <body>' becomes 'HTTP 401', 'URLError: <text>' becomes 'URLError', a code such as
-    ADAPTER_TIMEOUT stays as it is, and any other text becomes ERROR."""
+CODE_TOKEN = re.compile(r'[A-Za-z0-9_.\-]{1,64}')
+
+
+def error_code(value, depth=0):
+    """A diagnostic reduced to a bounded code, whatever its shape. Provider error bodies, exception text and an adapter's structured
+    error objects can carry a rejected key or a private address, so a packet never includes them:
+    - a string: 'HTTP 401: <body>' becomes 'HTTP 401', 'URLError: <text>' becomes 'URLError', an upper-case code such as
+      ADAPTER_TIMEOUT stays as it is, and any other text becomes ERROR;
+    - an object: its "code", "type" or "error" field if that is a short code token (or, for "error", reduces to one); else ERROR;
+    - anything else (a number, a list): ERROR. None stays None."""
+    if value is None:
+        return None
+    if isinstance(value, dict) and depth < 2:
+        for key in ('code', 'type', 'error'):
+            v = value.get(key)
+            if isinstance(v, str) and CODE_TOKEN.fullmatch(v):
+                return v
+            if key == 'error' and isinstance(v, (str, dict)):
+                return error_code(v, depth + 1)
+        return 'ERROR'
     if not isinstance(value, str):
+        return 'ERROR'
+    if re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', value):
         return value
-    if re.fullmatch(r'[A-Z][A-Z0-9_]*', value):
-        return value
-    m = re.match(r'(HTTP [0-9]{3})\b', value) or re.match(r'([A-Z][A-Za-z0-9_]*)(?=:)', value)
+    m = re.match(r'(HTTP [0-9]{3})\b', value) or re.match(r'([A-Z]\w{0,63})(?=:)', value, re.ASCII)
     return m.group(1) if m else 'ERROR'
 
 
+def counts(value, depth=0):
+    """Token usage as a packet carries it: numbers only, one nested level (as in prompt_tokens_details)."""
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    for k, v in value.items():
+        if not isinstance(k, str) or not CODE_TOKEN.fullmatch(k):
+            continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, dict) and depth == 0:
+            out[k] = counts(v, 1)
+    return out
+
+
+def model_name(value):
+    """The model an endpoint says served the call, as a bare name: a local server can report a file path, so only its last part is kept."""
+    if not isinstance(value, str):
+        return None
+    name = re.split(r'[\\/]', value)[-1]
+    return name if re.fullmatch(r'[A-Za-z0-9_.:@+\-]{1,128}', name) else 'OTHER'
+
+
 def share_safe_reply(reply):
-    """An adapter reply as a packet carries it: the kept fields, its error and each attempt's error as codes, no detail text."""
+    """An adapter reply as a packet carries it, every field bounded by shape: ok and retry as booleans, the reply text as written,
+    finish_reason as a code, the served model as a bare name, usage as numbers, the error and each attempt's error as codes, and
+    addedToRequest (what the adapter added to the request it sent). No detail text and no other fields."""
     if not isinstance(reply, dict):
         return None
-    out = {k: reply[k] for k in REPLY_KEEP if k in reply}
+    out = {}
+    for key in ('ok', 'retry'):
+        if isinstance(reply.get(key), bool):
+            out[key] = reply[key]
+    if isinstance(reply.get('content'), str):
+        out['content'] = reply['content']
+    if 'finish_reason' in reply:
+        fr = reply['finish_reason']
+        out['finish_reason'] = fr if fr is None or (isinstance(fr, str) and CODE_TOKEN.fullmatch(fr)) else 'OTHER'
+    if 'model' in reply:
+        out['model'] = model_name(reply['model'])
+    if 'usage' in reply:
+        out['usage'] = counts(reply['usage'])
+    if isinstance(reply.get('addedToRequest'), dict):
+        out['addedToRequest'] = reply['addedToRequest']
     if 'error' in reply:
         out['error'] = error_code(reply['error'])
     if isinstance(reply.get('attempts'), list):
-        out['attempts'] = [dict(attempt=a.get('attempt'), ok=a.get('ok'), error=error_code(a.get('error'))) for a in reply['attempts'] if isinstance(a, dict)]
+        out['attempts'] = [dict(attempt=a['attempt'] if isinstance(a.get('attempt'), int) and not isinstance(a.get('attempt'), bool) else None,
+                                ok=a['ok'] if isinstance(a.get('ok'), bool) else None, error=error_code(a.get('error')))
+                           for a in reply['attempts'] if isinstance(a, dict)]
     return out
 
 
@@ -488,19 +588,22 @@ def compare_export(cid):
         message=result.get('message'), model=result.get('model'), effort=result.get('effort'), plugin=result.get('plugin'),
         continued=result.get('continued'), historyTurns=result.get('history_turns'), sides=sides,
         # Recorded when the comparison ran. The adapter is named by its script, never its endpoint: base_url can name a private server.
-        adapter=result.get('adapter'), code=result.get('code'), codeScope=result.get('codeScope'),
+        adapter=result.get('adapter'), code=result.get('code'), codeScope=result.get('codeScope'), codeStatus=result.get('codeStatus'),
         missing=[n for n in PACKET_MEMBERS if raw[n] is None],
         files={n: hashlib.sha256(d).hexdigest() for n, d in sorted(files.items())},
         notes=['request-a/b.json and prompt-a/b.json are the lab\'s saved files, unchanged. request-a/b.json are exactly what the '
                'context plugin passed to the model adapter. The adapter may add fields (its reply records them as addedToRequest), and the '
                'model may render the messages differently through its chat template.',
-               'reply-a/b.json and result.json are share-safe copies: provider error text, exception text and detail messages are reduced '
-               'to their codes, and fields an adapter adds beyond the standard ones are left out. The lab\'s own data/compares folder keeps '
-               'the full originals.',
+               'reply-a/b.json and result.json are share-safe copies. Every error, whatever its shape, is reduced to a short code; detail '
+               'text and fields beyond the standard ones are left out; the served model is a bare name and usage is numbers only. The '
+               'lab\'s own data/compares folder keeps the full originals.',
                'model and usage under each side\'s adapter are what the endpoint reported, when it reported them.',
-               'missing lists the files this comparison never wrote: a side whose plugin failed has no request or reply, and comparisons '
-               'made before packets existed have no prompt-a/b.json.'
+               'missing lists the files this comparison never saved. For example, a side whose plugin failed while assembling its request '
+               'has no request or reply, and comparisons made before packets existed have no prompt-a/b.json.'
                + ('' if recorded else ' This comparison also predates code fingerprints, so adapter, code and codeScope are not recorded.'),
+               'code holds fingerprints taken from disk just before the first side ran (lab_server.py: the code the lab process had '
+               'loaded). codeStatus says whether any file changed during the run, which files could not be read, and how many past the '
+               'limit were left out; certain is true only when none changed and all were read.',
                'The endpoint address and any key are never included. The message, prompts and replies are included as written and can '
                'hold anything you or the model wrote: read the packet before you share it.'])
     buffer = io.BytesIO()
