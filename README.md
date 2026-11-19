@@ -118,9 +118,9 @@ In the Lab drawer, **Side by side** sends one message under two saved prompt ver
 The packet leaves out the endpoint address and any key. The adapter's metadata is reduced to safe forms:
 
 - every error becomes a short code (`HTTP 401`, for example), whatever shape the adapter reported it in;
-- the served model becomes a bare name;
 - token usage keeps only numbers;
-- anything the adapter added to the request keeps only standard generation settings, such as reasoning effort or temperature.
+- anything the adapter added to the request keeps only standard generation settings, such as reasoning effort or temperature, and only values that fit the setting (a number for temperature, for example);
+- the served model is kept as the name the endpoint reported, minus any file path. A name shaped like an address (an IP address, `host:port` or a URL) is replaced with `OTHER`, but any other name stays as the server gave it, so a server that names its models after private things will show them.
 
 The lab's own `data/compares/` keeps the full originals. The message, prompts, requests and replies go in as written, and can hold anything you or the model wrote, so read a packet before you share it. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
 

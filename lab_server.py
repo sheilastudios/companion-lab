@@ -370,6 +370,8 @@ CODE_SKIP = {'__pycache__', 'node_modules', '.git'}
 CODE_MAX = 200
 # The lab's own code as this process loaded it. Its file on disk can change after the lab starts; the record uses what is running.
 LAB_SOURCE_SHA = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+# The current shape of codeStatus. Records without it came from an earlier lab version, and an export treats them conservatively.
+CODE_STATUS_SCHEMA = 'code-status/2'
 
 
 def code_name(f):
@@ -382,11 +384,12 @@ def code_name(f):
 
 
 def script_paths():
-    """The scripts the plugin's and adapter's commands name, as resolved files."""
+    """The scripts the plugin's and adapter's commands name, as resolved paths, whether or not they exist now: a named script that is
+    missing is part of what the record should have covered."""
     out = []
     for cmd, cwd in ((PLUGIN['command'], PLUGIN_DIR), (MODEL.get('command', []), MODEL_DIR)):
         for a in cmd[1:]:
-            if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a) and (cwd / a).is_file():
+            if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a):
                 out.append((cwd / a).resolve())
     return out
 
@@ -402,8 +405,10 @@ def code_snapshot():
     under unreadable, and files past CODE_MAX are counted under omitted. The command scripts and plugin.json always come first."""
     try:
         root, data = ROOT.resolve(), DATA.resolve()
-        required = [p for p in [(PLUGIN_DIR / 'plugin.json').resolve(), *script_paths()] if p.is_file()]
-        folders = {PLUGIN_DIR.resolve()} | {s.parent for s in required if s.parent != root}
+        expected = list(dict.fromkeys([(PLUGIN_DIR / 'plugin.json').resolve(), *script_paths()]))
+        missing = [code_name(p) for p in expected if not p.is_file()]
+        required = [p for p in expected if p.is_file()]
+        folders = {PLUGIN_DIR.resolve()} | {s.parent for s in expected if s.parent != root and s.parent.is_dir()}
         extra, scan_errors = set(), []
         for folder in folders:
             # os.walk reports a folder it cannot list instead of skipping it silently, so an incomplete scan is known.
@@ -421,9 +426,9 @@ def code_snapshot():
                 files[code_name(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
             except OSError:
                 unreadable.append(code_name(f))
-        return dict(files=files, unreadable=unreadable, omitted=max(0, len(ordered) - limit), scanIncomplete=bool(scan_errors))
+        return dict(files=files, unreadable=unreadable, missing=missing, omitted=max(0, len(ordered) - limit), scanIncomplete=bool(scan_errors))
     except Exception:
-        return dict(files={}, unreadable=[], omitted=0, scanIncomplete=True, failed=True)
+        return dict(files={}, unreadable=[], missing=[], omitted=0, scanIncomplete=True, failed=True)
 
 
 def code_record(before, after):
@@ -437,13 +442,16 @@ def code_record(before, after):
     unreadable = sorted(set(before['unreadable']) | set(after['unreadable']))
     omitted = max(before['omitted'], after['omitted'])
     scan_incomplete = bool(before.get('scanIncomplete') or after.get('scanIncomplete'))
+    # A script the configuration names, or plugin.json, that was not there to fingerprint.
+    missing = sorted(set(before.get('missing', [])) | set(after.get('missing', [])))
     # Two separate questions. stable: nothing in scope changed between the two snapshots. complete: every file in scope was found
     # and read. certain needs both.
     stable = not changed and not failed
-    complete = not failed and not unreadable and not omitted and not scan_incomplete
-    status = dict(taken='Plugin and adapter files: read from disk just before the first side ran, and checked again after the last side. '
+    complete = not failed and not unreadable and not missing and not omitted and not scan_incomplete
+    status = dict(schema=CODE_STATUS_SCHEMA,
+                  taken='Plugin and adapter files: read from disk just before the first side ran, and checked again after the last side. '
                         'lab_server.py: the code this lab process loaded.',
-                  changedDuringRun=changed, unreadable=unreadable, omitted=omitted, scanIncomplete=scan_incomplete,
+                  changedDuringRun=changed, unreadable=unreadable, missingRequired=missing, omitted=omitted, scanIncomplete=scan_incomplete,
                   labChangedOnDiskSinceStart=lab_on_disk != LAB_SOURCE_SHA, stable=stable, complete=complete, certain=stable and complete)
     notes = []
     if failed:
@@ -451,8 +459,9 @@ def code_record(before, after):
     if changed:
         notes.append('Files changed on disk while this comparison ran, so which version each side ran is uncertain. '
                      'The fingerprints are from before the first side.')
-    if unreadable or omitted or scan_incomplete:
-        notes.append('Not every file in scope was fingerprinted (see unreadable, omitted and scanIncomplete), so the record is incomplete.')
+    if unreadable or missing or omitted or scan_incomplete:
+        notes.append('Not every file in scope was fingerprinted (see unreadable, missingRequired, omitted and scanIncomplete), so the '
+                     'record is incomplete.')
     if notes:
         status['note'] = ' '.join(notes)
     return dict(code={'lab_server.py': LAB_SOURCE_SHA, **before['files']}, codeScope=CODE_SCOPE, codeStatus=status)
@@ -465,18 +474,31 @@ PACKET_MEMBERS = ('result.json', 'prompt-a.json', 'prompt-b.json', 'request-a.js
 # A code is one identifier: letters, digits and underscores. No dots, hyphens, colons or slashes, so a hostname, an address or a
 # URL can never pass as one.
 CODE_TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}')
-# What a packet keeps of an adapter's addedToRequest: standard generation settings, each a boolean, a number or one identifier.
-# Anything else an adapter added (routing, authentication, URLs) is left out and only counted.
-GENERATION_SETTINGS = {'reasoning_effort', 'effort', 'temperature', 'top_p', 'top_k', 'min_p', 'max_tokens', 'max_completion_tokens',
-                       'seed', 'presence_penalty', 'frequency_penalty', 'repeat_penalty', 'n', 'stream', 'verbosity', 'response_format'}
+# What a packet keeps of an adapter's addedToRequest: standard generation settings, each held to its own value contract. Anything
+# else an adapter added (routing, authentication, URLs), or a setting whose value breaks its contract, is left out and only counted.
+EFFORT_LEVELS = {'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'default'}
+GENERATION_SETTINGS = {
+    'reasoning_effort': EFFORT_LEVELS, 'effort': EFFORT_LEVELS, 'verbosity': {'low', 'medium', 'high'},
+    'temperature': float, 'top_p': float, 'min_p': float, 'presence_penalty': float, 'frequency_penalty': float, 'repeat_penalty': float,
+    'top_k': int, 'max_tokens': int, 'max_completion_tokens': int, 'seed': int, 'n': int,
+    'stream': bool,
+}
+
+
+def setting_ok(contract, value):
+    """Whether a value meets its setting's contract: one of a fixed set of words, an integer, a number, or a boolean."""
+    if isinstance(contract, set):
+        return isinstance(value, str) and value in contract
+    if contract is bool:
+        return type(value) is bool
+    if contract is int:
+        return type(value) is int
+    return type(value) in (int, float)
 
 
 def generation_settings(added):
-    """An adapter's addedToRequest as a packet carries it: GENERATION_SETTINGS only, with plain values, plus how many were left out."""
-    kept = {}
-    for k, v in added.items():
-        if k in GENERATION_SETTINGS and (isinstance(v, (bool, int, float)) or (isinstance(v, str) and CODE_TOKEN.fullmatch(v))):
-            kept[k] = v
+    """An adapter's addedToRequest as a packet carries it: GENERATION_SETTINGS that meet their contracts, plus how many were left out."""
+    kept = {k: v for k, v in added.items() if k in GENERATION_SETTINGS and setting_ok(GENERATION_SETTINGS[k], v)}
     return kept, len(added) - len(kept)
 
 
@@ -521,11 +543,19 @@ def counts(value, depth=0):
 
 
 def model_name(value):
-    """The model an endpoint says served the call, as a bare name: a local server can report a file path, so only its last part is kept."""
+    """The model an endpoint says served the call, as a bare name. A local server can report a file path, so only its last part is
+    kept. A value that looks like an address (an IP address, a host:port, user@host, or a URL) becomes OTHER. Anything else is kept as
+    the endpoint reported it, so a server that names its models after private things will show them: the README says so."""
     if not isinstance(value, str):
         return None
+    if '://' in value:
+        return 'OTHER'
     name = re.split(r'[\\/]', value)[-1]
-    return name if re.fullmatch(r'[A-Za-z0-9_.:@+\-]{1,128}', name) else 'OTHER'
+    if not re.fullmatch(r'[A-Za-z0-9_.:+\-]{1,128}', name):
+        return 'OTHER'
+    if re.search(r'(^|[^0-9])\d{1,3}(\.\d{1,3}){3}($|[^0-9])', name) or re.search(r':\d{1,5}$', name) or re.fullmatch(r'[0-9a-fA-F:]+', name) and name.count(':') >= 2:
+        return 'OTHER'
+    return name
 
 
 def share_safe_reply(reply):
@@ -613,13 +643,23 @@ def compare_export(cid):
         if safe[x] is not None:
             files[f'reply-{x}.json'] = json.dumps(safe[x], ensure_ascii=False, indent=1).encode()
     files['result.json'] = json.dumps(shared_result, ensure_ascii=False, indent=1).encode()
-    # Three kinds of record: fingerprints taken before and after the run (codeStatus present), a code map from an earlier lab version
-    # that hashed the files once after the run (code without codeStatus), and no fingerprints at all.
-    if isinstance(result.get('codeStatus'), dict):
-        code_status, code_note = result['codeStatus'], (
+    # Four kinds of record: the current codeStatus (before-and-after snapshots, stable and complete); an earlier codeStatus that
+    # counted only changes toward certain; a code map from an earlier version that hashed the files once after the run (code without
+    # codeStatus); and no fingerprints at all.
+    stored = result.get('codeStatus')
+    if isinstance(stored, dict) and stored.get('schema') == CODE_STATUS_SCHEMA:
+        code_status, code_note = stored, (
             'code holds fingerprints taken from disk just before the first side ran (lab_server.py: the code the lab process had '
             'loaded). codeStatus.stable says no file in scope changed during the run; codeStatus.complete says every file in scope was '
-            'found and read; certain needs both.')
+            'found and read (none unreadable, missing or omitted, and the folder scan finished); certain needs both.')
+    elif isinstance(stored, dict):
+        # The earlier codeStatus did not record missing files or scan errors, so completeness cannot be shown: certain is false.
+        changed = stored.get('changedDuringRun') if isinstance(stored.get('changedDuringRun'), list) else None
+        code_status = dict(schema='code-status/1 (normalized on export)', taken=stored.get('taken'), changedDuringRun=changed,
+                           unreadable=stored.get('unreadable'), omitted=stored.get('omitted'),
+                           stable=(not changed) if changed is not None else None, complete=None, certain=False)
+        code_note = ('This comparison was recorded by an earlier version of the lab, which took fingerprints before and after the run but '
+                     'did not check that every file was found and read. complete is unknown, so codeStatus.certain is false.')
     elif 'code' in result:
         code_status = dict(taken='Once, after both sides had run, by an earlier version of the lab.', stable=None, complete=None, certain=False)
         code_note = ('This comparison was made by an earlier version of the lab, which fingerprinted the code once after the run, so '
@@ -639,9 +679,12 @@ def compare_export(cid):
                'differently through its chat template.',
                'reply-a/b.json and result.json are share-safe copies, with each adapter field reduced to a safe form. Every error, '
                'whatever its shape, becomes one identifier-style code (no dots, colons or slashes) or ERROR; detail text is dropped. '
-               'finish_reason is a code, the served model is a bare name, and usage is numbers only. addedToRequest keeps only standard '
-               'generation settings with plain values; addedToRequestOmitted counts anything else the adapter added. Fields beyond '
-               'these are left out. The lab\'s own data/compares folder keeps the full originals.',
+               'finish_reason is a code and usage is numbers only. The served model is the name the endpoint reported, cut to its last '
+               'path part; a value shaped like an address (an IP address, host:port, user@host or a URL) becomes OTHER, and any other '
+               'name is kept as reported, so a server that names its models after private things will show them. addedToRequest keeps '
+               'only standard generation settings whose values meet each setting\'s contract (an effort level, a number, an integer or a '
+               'boolean); addedToRequestOmitted counts anything else the adapter added. Fields beyond these are left out. The lab\'s own '
+               'data/compares folder keeps the full originals.',
                'model and usage under each side\'s adapter are what the endpoint reported, when it reported them.',
                'missing lists the files this comparison never saved. For example, a side whose plugin failed while assembling its request '
                'has no request or reply, and comparisons made before packets existed have no prompt-a/b.json.',

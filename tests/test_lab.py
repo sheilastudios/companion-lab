@@ -125,6 +125,10 @@ def provenance_check():
             "                          detail='Rejected key sk-test-structured', extra=dict(endpoint='http://10.7.7.7/v1'))))\n"
             "elif msg == 'Host':\n"
             "    print(json.dumps(dict(ok=False, retry=False, error=dict(code='db.internal.example', type='api.internal-host.example'))))\n"
+            "elif msg in ('Route', 'Named'):\n"
+            "    print(json.dumps(dict(ok=True, content='Fine.', finish_reason='stop',\n"
+            "                          model='gpu-box.internal:11434' if msg == 'Route' else 'qwen3:4b',\n"
+            "                          addedToRequest=dict(reasoning_effort='high', temperature='gpu_box_internal', top_k=2.5, stream='yes'))))\n"
             'else:\n'
             "    print(json.dumps(dict(ok=True, content='Fine.', finish_reason='stop', model='/home/someone/models/secret-path/qwen.gguf',\n"
             "                          usage=dict(prompt_tokens=5, completion_tokens=1, note='sk-test-structured'),\n"
@@ -237,6 +241,31 @@ def provenance_check():
             hz = zipfile.ZipFile(io.BytesIO(packet)) if isinstance(packet, bytes) else None
             hwhole = b''.join(hz.read(n) for n in hz.namelist()) if hz else b''
             hp = json.loads(hz.read(f"{host['id']}/packet.json")) if hz else {}
+            route = post('/api/compare', dict(a=h[-1], b=h[-2], message='Route', model='fake-model', effort='default'))
+            packet = post('/api/compare/export', dict(id=route['id']), raw=True)
+            rz = zipfile.ZipFile(io.BytesIO(packet)) if isinstance(packet, bytes) else None
+            rwhole = b''.join(rz.read(n) for n in rz.namelist()) if rz else b''
+            ra = json.loads(rz.read(f"{route['id']}/packet.json"))['sides']['a']['adapter'] if rz else {}
+            check('a served model shaped like host:port becomes OTHER, and settings with the wrong kind of value are left out',
+                  rz is not None and ra.get('model') == 'OTHER' and ra.get('addedToRequest') == dict(reasoning_effort='high') and ra.get('addedToRequestOmitted') == 3
+                  and b'gpu-box' not in rwhole and b'gpu_box' not in rwhole and b'11434' not in rwhole, ra)
+            named = post('/api/compare', dict(a=h[-1], b=h[-2], message='Named', model='fake-model', effort='default'))
+            packet = post('/api/compare/export', dict(id=named['id']), raw=True)
+            na = json.loads(zipfile.ZipFile(io.BytesIO(packet)).read(f"{named['id']}/packet.json"))['sides']['a']['adapter'] if isinstance(packet, bytes) else {}
+            check('an ordinary model tag with a colon is kept as reported', na.get('model') == 'qwen3:4b', na)
+
+            # The adapter script itself goes missing: both sides fail, the comparison still saves, and the record is incomplete.
+            aside = folder / 'adapter.py.aside'
+            script.rename(aside)
+            try:
+                gone = post('/api/compare', dict(a=h[-1], b=h[-2], message='Hello', model='fake-model', effort='default'))
+            finally:
+                aside.rename(script)
+            status = gone.get('codeStatus', {})
+            check('a missing adapter script is named, and the record is incomplete and not certain',
+                  'error' in gone.get('a', {}) and any(n.endswith('/adapter.py') for n in status.get('missingRequired', []))
+                  and status.get('complete') is False and status.get('certain') is False, (gone.get('a'), status))
+
             check('an error code shaped like a hostname is not passed through as a code',
                   hz is not None and b'db.internal' not in hwhole and b'internal-host' not in hwhole and hp['sides']['a']['adapter']['error'] == 'ERROR' and hp['sides']['a']['error'] == 'ERROR', hp.get('sides') or packet)
         finally:
@@ -508,6 +537,20 @@ def main():
                   status == 200 and ap['code'] == prior['code'] and ap['codeStatus']['certain'] is False
                   and any('earlier version of the lab' in n for n in ap['notes']) and not any('just before the first side' in n for n in ap['notes']), ap.get('codeStatus') or body[:300])
             shutil.rmtree(after_dir)
+
+            # A codeStatus from the earlier version that counted only changes toward certain: normalized, and never certain.
+            r3_id = cmp_['id'][:-6] + 'eeeeee'
+            r3_dir = data_dir.parent / r3_id
+            shutil.copytree(data_dir, r3_dir)
+            r3 = json.loads((r3_dir / 'result.json').read_text(encoding='utf-8'))
+            r3['codeStatus'] = dict(taken='earlier', changedDuringRun=[], unreadable=['external/abcd1234/locked.txt'], omitted=0, certain=True)
+            (r3_dir / 'result.json').write_text(json.dumps(r3), encoding='utf-8')
+            status, _, body = post_raw(dict(id=r3_id))
+            r3p = json.loads(zipfile.ZipFile(io.BytesIO(body)).read(f'{r3_id}/packet.json')) if status == 200 else {}
+            check('an earlier-version code status is normalized: complete unknown, never certain',
+                  status == 200 and r3p['codeStatus']['certain'] is False and r3p['codeStatus']['complete'] is None
+                  and 'normalized' in r3p['codeStatus']['schema'] and any('did not check that every file' in n for n in r3p['notes']), r3p.get('codeStatus') or body[:300])
+            shutil.rmtree(r3_dir)
 
             # Failures: a provider's error body can quote the key or a private address. The packet keeps only the code.
             failing[0], fail_body[0] = 401, b'{"error": "Incorrect API key provided: test-key-value at http://10.1.2.3/v1"}'
