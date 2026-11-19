@@ -49,7 +49,7 @@ def chat(options, request, effort):
                     detail='The model stopped without a complete text reply.', finish_reason=finish, **served)
     if not isinstance(content, str) or not content.strip():
         return dict(ok=False, error='MODEL_NO_TEXT', retry=False,
-                    detail='The model returned no text reply.', **served)
+                    detail='The model returned no text reply.', finish_reason=finish, **served)
     return dict(ok=True, content=content, finish_reason=finish, **served)
 
 

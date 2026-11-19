@@ -106,14 +106,16 @@ In the Lab drawer, **Import character card** reads SillyTavern cards (V1, V2 or 
 
 In the Lab drawer, **Side by side** sends one message under two saved prompt versions and shows the replies next to each other. Leave it fresh, or tick **continue the open conversation** to send it after that conversation's turns. Nothing is added to the conversation. Both requests and replies are kept in `data/compares/`.
 
-**Download packet** saves one comparison as a single zip containing:
+**Download packet** saves one comparison as a single zip of the files it saved, plus `packet.json`, which describes them:
 
 - both requests, exactly as the context plugin passed them to the model adapter;
 - both replies, with the finish reason, the served model and token counts when the endpoint reports them;
 - both prompt versions, as they were used;
-- the result, and `packet.json`, which lists what each file is, with SHA-256s of the files and of the lab, plugin and adapter code that ran.
+- the result.
 
-The endpoint address and any key are never included. Messages and prompts are included as written, so check them for personal details before you share a packet. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
+`packet.json` lists each file with its SHA-256. It names any file the comparison never wrote: a side whose plugin failed has no request or reply, and older comparisons have no prompt versions. It also carries fingerprints of the lab, plugin and adapter code, taken when the comparison ran, and states exactly which files they cover.
+
+The packet leaves out the endpoint address and any key, and it reduces provider error messages to their codes (`HTTP 401`, for example). The lab's own `data/compares/` keeps the full originals. The message, prompts and replies go in as written, and can hold anything you or the model wrote, so read a packet before you share it. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
 
 ## Test it
 

@@ -1,7 +1,7 @@
 """End-to-end test of the lab with the turn plugin and the OpenAI-compatible adapter, against a fake model. No key or network needed.
     python -X utf8 -B tests/test_lab.py
 """
-import hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, zipfile
+import hashlib, io, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SEED = json.loads((ROOT / 'plugins' / 'turns' / 'seed.json').read_text(encoding='utf-8'))['parts']
 SYSTEM = '\n\n'.join(p['text'] for p in SEED if p['role'] == 'system' and p.get('position', 'start') == 'start')
 results, calls, failing = [], [], [False]
+fail_body, empty = [b''], [False]   # what a failing fake endpoint says; whether a successful one returns no text
 
 
 def get_json(url, timeout=60):
@@ -30,10 +31,12 @@ class FakeModel(BaseHTTPRequestHandler):
         calls.append(dict(body=body, auth=self.headers.get('Authorization')))
         if failing[0]:
             self.send_response(500 if failing[0] is True else failing[0])
+            self.send_header('Content-Length', str(len(fail_body[0])))
             self.end_headers()
+            self.wfile.write(fail_body[0])
             return
         data = json.dumps(dict(model='fake-model-served', usage=dict(prompt_tokens=11, completion_tokens=2, total_tokens=13),
-                               choices=[dict(message=dict(content=f'Reply {len(calls)}'), finish_reason='stop')])).encode()
+                               choices=[dict(message=dict(content='' if empty[0] else f'Reply {len(calls)}'), finish_reason='stop')])).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
@@ -248,8 +251,12 @@ def main():
             check('it holds both requests, replies and prompt versions, the result and packet.json',
                   names == ['packet.json', 'prompt-a.json', 'prompt-b.json', 'reply-a.json', 'reply-b.json', 'request-a.json', 'request-b.json', 'result.json'], names)
             if z:
-                kept_same = all(z.read(f"{cmp_['id']}/{n}") == (data_dir / n).read_bytes() for n in names if n != 'packet.json')
-                check('the kept files go in unchanged', kept_same)
+                kept_same = all(z.read(f"{cmp_['id']}/{n}") == (data_dir / n).read_bytes() for n in names if n.startswith(('request-', 'prompt-')))
+                check('requests and prompt versions go in unchanged', kept_same)
+                shared_reply = json.loads(z.read(f"{cmp_['id']}/reply-a.json"))
+                check('replies go in share-safe: the reply text and standard fields, nothing else',
+                      shared_reply.get('content') == json.loads((data_dir / 'reply-a.json').read_text(encoding='utf-8'))['content']
+                      and set(shared_reply) <= {'ok', 'content', 'finish_reason', 'model', 'usage', 'addedToRequest', 'retry', 'attempts', 'error'}, shared_reply)
                 pk = json.loads(z.read(f"{cmp_['id']}/packet.json"))
                 check('packet.json names each side: its version, prompt digest, request and reply',
                       pk['sides']['a']['version'] == h[-1] and pk['sides']['b']['version'] == other and pk['sides']['a']['request'] == 'request-a.json'
@@ -260,13 +267,103 @@ def main():
                 check('the prompt versions in the packet are the ones each side used',
                       json.loads(z.read(f"{cmp_['id']}/prompt-b.json"))['parts'] == post('/api/prompt/version', dict(name=other))['config']['parts'])
                 check('packet.json lists every file with its SHA-256', all(pk['files'][n] == hashlib.sha256(z.read(f"{cmp_['id']}/{n}")).hexdigest() for n in names if n != 'packet.json')
-                      and 'lab_server.py' in pk['code'] and 'models/openai_compatible/adapter.py' in pk['code'], pk.get('code'))
+                      and pk['missing'] == [], pk.get('files'))
+                recorded = json.loads((data_dir / 'result.json').read_text(encoding='utf-8'))
+                check('code fingerprints are the ones recorded when the comparison ran, with their scope',
+                      pk['code'] == recorded['code'] and {'lab_server.py', 'models/openai_compatible/adapter.py', 'plugins/turns/plugin.py', 'plugins/turns/plugin.json'} <= set(pk['code'])
+                      and pk['codeScope'] and pk['adapter'] == 'models/openai_compatible/adapter.py', pk.get('code'))
                 whole = b''.join(z.read(n) for n in z.namelist())
                 check('the endpoint address and key are not in the packet', b'127.0.0.1' not in whole and b'LAB_TEST_KEY' not in whole and b'test-key-value' not in whole)
             bad_id = post_raw(dict(id='../sessions'))
             check('an invalid comparison id is refused', bad_id[0] == 400, bad_id)
+            wide = post_raw(dict(id='２０２００１０１-000000-abcdef'))
+            check('an id with non-ASCII digits is refused', wide[0] == 400, wide)
             gone = post_raw(dict(id='20200101-000000-abcdef'))
             check('an unknown comparison is not found, naming no folder', gone[0] == 404 and b'compares' not in gone[2], gone)
+
+            # A file the lab never wrote stays out; a linked member refuses the export.
+            (data_dir / 'extra.json').write_text('{"not": "the lab\'s"}', encoding='utf-8')
+            status, _, body = post_raw(dict(id=cmp_['id']))
+            check('a stray file in the comparison folder is not packed', status == 200 and not any(n.endswith('extra.json') for n in zipfile.ZipFile(io.BytesIO(body)).namelist()))
+            (data_dir / 'extra.json').unlink()
+            outside = Path(tmp) / 'outside.json'
+            outside.write_text('{"secret": "outside the comparison"}', encoding='utf-8')
+            linked_id = cmp_['id'][:-6] + 'aaaaaa'
+            linked_dir = data_dir.parent / linked_id
+            shutil.copytree(data_dir, linked_dir)
+            (linked_dir / 'prompt-a.json').unlink()
+            try:
+                os.symlink(outside, linked_dir / 'prompt-a.json')
+                linked = True
+            except OSError:
+                linked = False   # creating a symlink needs a privilege on Windows; the hard link below covers the same rule
+            if linked:
+                ls = post_raw(dict(id=linked_id))
+                check('a member linked to another file refuses the export', ls[0] == 400 and b'outside the comparison' not in ls[2] and str(tmp).encode() not in ls[2], ls)
+                (linked_dir / 'prompt-a.json').unlink()
+            os.link(outside, linked_dir / 'prompt-a.json')
+            hl = post_raw(dict(id=linked_id))
+            check('a member hard-linked to another file refuses the export', hl[0] == 400 and b'outside the comparison' not in hl[2] and str(tmp).encode() not in hl[2], hl)
+            shutil.rmtree(linked_dir)
+            # A comparison folder that is itself a link to a folder elsewhere (a junction on Windows, which needs no privilege).
+            elsewhere = Path(tmp) / 'elsewhere'
+            shutil.copytree(data_dir, elsewhere)
+            folder_id = cmp_['id'][:-6] + 'cccccc'
+            if os.name == 'nt':
+                made = subprocess.run(['cmd', '/c', 'mklink', '/J', str(data_dir.parent / folder_id), str(elsewhere)], capture_output=True).returncode == 0
+            else:
+                os.symlink(elsewhere, data_dir.parent / folder_id, target_is_directory=True)
+                made = True
+            fl = post_raw(dict(id=folder_id))
+            check('a comparison folder linked elsewhere refuses the export', made and fl[0] == 400 and str(tmp).encode() not in fl[2], (made, fl))
+            if os.name == 'nt':
+                os.rmdir(data_dir.parent / folder_id)   # removes the junction itself, never what it points to
+            else:
+                (data_dir.parent / folder_id).unlink()
+
+            # A comparison saved before packets existed: no prompt files, no plugin, no code record.
+            legacy_id = cmp_['id'][:-6] + 'bbbbbb'
+            legacy_dir = data_dir.parent / legacy_id
+            shutil.copytree(data_dir, legacy_dir)
+            for n in ('prompt-a.json', 'prompt-b.json'):
+                (legacy_dir / n).unlink()
+            old = json.loads((legacy_dir / 'result.json').read_text(encoding='utf-8'))
+            for k in ('plugin', 'adapter', 'code', 'codeScope'):
+                old.pop(k, None)
+            for x in 'ab':
+                old[x].pop('prompt', None)
+            (legacy_dir / 'result.json').write_text(json.dumps(old), encoding='utf-8')
+            status, _, body = post_raw(dict(id=legacy_id))
+            lp = json.loads(zipfile.ZipFile(io.BytesIO(body)).read(f'{legacy_id}/packet.json')) if status == 200 else {}
+            check('an older comparison exports, saying what it never recorded',
+                  status == 200 and lp['missing'] == ['prompt-a.json', 'prompt-b.json'] and lp['code'] is None and lp['sides']['a']['promptFile'] is None
+                  and lp['sides']['a']['version'] == old['a']['version'] and any('predates code fingerprints' in n for n in lp['notes']), lp or body[:300])
+            shutil.rmtree(legacy_dir)
+
+            # Failures: a provider's error body can quote the key or a private address. The packet keeps only the code.
+            failing[0], fail_body[0] = 401, b'{"error": "Incorrect API key provided: test-key-value at http://10.1.2.3/v1"}'
+            failed = post('/api/compare', dict(a=h[-1], b=other, message='Fail me', model='fake-model', effort='default'))
+            failing[0], fail_body[0] = False, b''
+            fdir = data_dir.parent / failed['id']
+            check('the lab keeps the full provider error locally', b'test-key-value' in (fdir / 'reply-a.json').read_bytes(), failed)
+            status, _, body = post_raw(dict(id=failed['id']))
+            fz = zipfile.ZipFile(io.BytesIO(body)) if status == 200 else None
+            fwhole = b''.join(fz.read(n) for n in fz.namelist()) if fz else b''
+            fp = json.loads(fz.read(f"{failed['id']}/packet.json")) if fz else {}
+            check('a failed side exports with its error reduced to the code, quoting nothing',
+                  status == 200 and b'test-key-value' not in fwhole and b'10.1.2.3' not in fwhole and b'Incorrect API key' not in fwhole
+                  and fp['sides']['a']['adapter']['error'] == 'HTTP 401' and fp['sides']['a']['error'] == 'HTTP 401' and not fp['sides']['a']['completed']
+                  and all(a['error'] == 'HTTP 401' for a in fp['sides']['a']['adapter']['attempts']), fp.get('sides') or body[:300])
+
+            # A reply with no text keeps the finish reason the endpoint reported.
+            empty[0] = True
+            blank = post('/api/compare', dict(a=h[-1], b=other, message='Say nothing', model='fake-model', effort='default'))
+            empty[0] = False
+            status, _, body = post_raw(dict(id=blank['id']))
+            bp = json.loads(zipfile.ZipFile(io.BytesIO(body)).read(f"{blank['id']}/packet.json")) if status == 200 else {}
+            check('a no-text reply keeps its finish reason, served model and usage',
+                  status == 200 and all(bp['sides'][x]['adapter']['error'] == 'MODEL_NO_TEXT' and bp['sides'][x]['adapter']['finish_reason'] == 'stop'
+                                        and bp['sides'][x]['adapter']['usage']['total_tokens'] == 13 for x in 'ab'), bp.get('sides') or body[:300])
             kept = json.loads((Path(tmp) / 'data' / 'sessions' / (sid + '.json')).read_text(encoding='utf-8'))['turns']
             n1 = len(calls)
             cont = post('/api/compare', dict(a=h[-1], b=h[-1], message='Go on', model='fake-model', effort='default', id=sid))

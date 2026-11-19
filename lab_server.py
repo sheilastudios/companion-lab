@@ -352,63 +352,160 @@ def compare(b):
     # (or three with a turn) can collide. Side by side runs under the same lock as a turn.
     side(0)
     side(1)
+    # The code that produced this comparison is fingerprinted now, when it ran, so a packet exported later still describes it.
     result = dict(id=cid, at=time.strftime('%Y-%m-%d %H:%M:%S'), message=message, model=b['model'], effort=b['effort'], plugin=PLUGIN.get('id'), continued=b.get('id') or None,
-                  history_turns=len(turns), a=out[0], b=out[1])
+                  history_turns=len(turns), a=out[0], b=out[1], adapter=adapter_id(), code=code_files(), codeScope=CODE_SCOPE)
     write(DATA / 'compares' / cid / 'result.json', result)
     return result
 
 
+CODE_SCOPE = ('lab_server.py, every file in the context plugin\'s folder, and every file in the folder of each script the model adapter\'s '
+              'command names (so an adapter\'s own imports in that folder are covered). Shared code outside those folders, the Python '
+              'or Node runtime, and the model endpoint are not covered.')
+CODE_SKIP = {'__pycache__', 'node_modules', '.git'}
+CODE_MAX = 200
+
+
+def adapter_id():
+    """The model adapter as a portable name: its script relative to the lab, or only the file name when it lives elsewhere."""
+    scripts = [MODEL_DIR / a for a in MODEL.get('command', [])[1:] if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a)]
+    if not scripts:
+        return None
+    f = scripts[-1].resolve()
+    return f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.name
+
+
 def code_files():
-    """The code that ran, by file and SHA-256: the lab, the context plugin and the model adapter (the files their commands name).
-    A packet records these instead of a version number, so a reader can tell whether their copy matches."""
-    found = {ROOT / 'lab_server.py', PLUGIN_DIR / 'plugin.json'}
+    """The code that ran, by file and SHA-256, within CODE_SCOPE. Recorded with each comparison when it runs."""
+    found = {ROOT / 'lab_server.py'}
+    folders = {PLUGIN_DIR}
     for cmd, cwd in ((PLUGIN['command'], PLUGIN_DIR), (MODEL['command'], MODEL_DIR)):
-        found.update(cwd / a for a in cmd[1:] if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a))
+        for a in cmd[1:]:
+            if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a) and (cwd / a).is_file():
+                script = (cwd / a).resolve()
+                found.add(script)
+                # A script directly in the lab's own folder covers only itself: the lab folder holds data and everything else.
+                if script.parent != ROOT.resolve():
+                    folders.add(script.parent)
+    data = DATA.resolve()
+    for folder in folders:
+        for candidate in folder.rglob('*'):
+            if candidate.is_file() and not CODE_SKIP & set(candidate.parts) and not candidate.resolve().is_relative_to(data) and candidate.suffix not in ('.pyc', '.log'):
+                found.add(candidate)
     out = {}
-    for f in sorted(p.resolve() for p in found if p.is_file()):
-        name = f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.name
+    for f in sorted({p.resolve() for p in found if p.is_file()})[:CODE_MAX]:
+        name = f.relative_to(ROOT.resolve()).as_posix() if f.is_relative_to(ROOT.resolve()) else f.name
         out[name] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out
 
 
-# What packet.json copies from each side's adapter reply: completion status and what the endpoint reported. Never the reply text,
-# which stays in reply-a/b.json.
-REPLY_FIELDS = ('ok', 'error', 'finish_reason', 'model', 'usage', 'attempts', 'addedToRequest')
+# A packet carries only the files the lab writes for a comparison, read only from that comparison's own folder.
+PACKET_MEMBERS = ('result.json', 'prompt-a.json', 'prompt-b.json', 'request-a.json', 'request-b.json', 'reply-a.json', 'reply-b.json')
+# What a packet keeps of an adapter reply. Anything else an adapter adds stays in the lab's local copy.
+REPLY_KEEP = ('ok', 'content', 'finish_reason', 'model', 'usage', 'addedToRequest', 'retry')
+
+
+def error_code(value):
+    """A diagnostic reduced to its code. Provider error bodies and exception text can carry a rejected key or a private address, so a
+    packet never includes them: 'HTTP 401: <body>' becomes 'HTTP 401', 'URLError: <text>' becomes 'URLError', a code such as
+    ADAPTER_TIMEOUT stays as it is, and any other text becomes ERROR."""
+    if not isinstance(value, str):
+        return value
+    if re.fullmatch(r'[A-Z][A-Z0-9_]*', value):
+        return value
+    m = re.match(r'(HTTP [0-9]{3})\b', value) or re.match(r'([A-Z][A-Za-z0-9_]*)(?=:)', value)
+    return m.group(1) if m else 'ERROR'
+
+
+def share_safe_reply(reply):
+    """An adapter reply as a packet carries it: the kept fields, its error and each attempt's error as codes, no detail text."""
+    if not isinstance(reply, dict):
+        return None
+    out = {k: reply[k] for k in REPLY_KEEP if k in reply}
+    if 'error' in reply:
+        out['error'] = error_code(reply['error'])
+    if isinstance(reply.get('attempts'), list):
+        out['attempts'] = [dict(attempt=a.get('attempt'), ok=a.get('ok'), error=error_code(a.get('error'))) for a in reply['attempts'] if isinstance(a, dict)]
+    return out
+
+
+def packet_member(folder, name):
+    """One kept file's bytes, or None when the comparison never wrote it. A file that is a link, has other hard links, or resolves
+    outside the comparison's folder is refused: the lab never writes one, so it did not come from this comparison."""
+    path = folder / name
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or path.resolve(strict=True) != folder.resolve(strict=True) / name or not path.is_file() or os.stat(path).st_nlink != 1:
+        raise ValueError('This comparison holds a file the lab did not write, so it was not exported.')
+    return path.read_bytes()
 
 
 def compare_export(cid):
-    """One Side by side comparison as a single zip: the files the lab kept for it, unchanged, plus packet.json, which says what each
-    file is and gathers what a reader checks first (each side's prompt version, completion status and token counts).
-    Never included: the endpoint address, keys, or anything outside this comparison's folder."""
-    if not isinstance(cid, str) or not re.fullmatch(r'\d{8}-\d{6}-[0-9a-f]{6}', cid):
+    """One Side by side comparison as a single zip: the files the lab kept for it, plus packet.json, which says what each file is and
+    gathers what a reader checks first (each side's prompt version, completion status and token counts). Requests and prompt versions
+    go in unchanged; replies and the result go in as share-safe copies, with diagnostics reduced to codes (error_code).
+    Never included: the endpoint address, keys, provider error text, or anything outside this comparison's folder."""
+    if not isinstance(cid, str) or not re.fullmatch(r'[0-9]{8}-[0-9]{6}-[0-9a-f]{6}', cid):
         raise ValueError('Invalid comparison')
+    root = (DATA / 'compares').resolve()
     folder = DATA / 'compares' / cid
-    result = read(folder / 'result.json')
-    files = {kept.name: kept.read_bytes() for kept in sorted(folder.glob('*.json'))}
+    if not folder.exists() and not folder.is_symlink():
+        raise FileNotFoundError(2, 'No such comparison', cid)
+    try:
+        if folder.is_symlink() or folder.resolve(strict=True) != root / cid or not folder.is_dir():
+            raise ValueError('This comparison folder is not one the lab wrote, so it was not exported.')
+        raw = {n: packet_member(folder, n) for n in PACKET_MEMBERS}
+        if raw['result.json'] is None:
+            raise FileNotFoundError(2, 'No such comparison', cid)
+        result = json.loads(raw['result.json'])
+        replies = {x: json.loads(raw[f'reply-{x}.json']) if raw[f'reply-{x}.json'] is not None else None for x in 'ab'}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        if isinstance(e, FileNotFoundError) and e.filename == cid:
+            raise
+        raise ValueError('This comparison could not be read for export.') from None
+    if not isinstance(result, dict):
+        raise ValueError('This comparison could not be read for export.')
+    files = {n: d for n, d in raw.items() if d is not None and not n.startswith('reply-') and n != 'result.json'}
+    safe = {x: share_safe_reply(replies[x]) for x in 'ab'}
     sides = {}
+    shared_result = dict(result)
     for x in 'ab':
-        side = result.get(x) or {}
-        named = lambda kind: f'{kind}-{x}.json' if f'{kind}-{x}.json' in files else None
-        reply = json.loads(files[named('reply')]) if named('reply') else None
+        side = result.get(x) if isinstance(result.get(x), dict) else {}
+        named = lambda kind: f'{kind}-{x}.json' if raw[f'{kind}-{x}.json'] is not None else None
+        # The side's error text can quote a provider body or a plugin's stderr: the packet keeps only its code.
+        code = (safe[x] or {}).get('error') if 'error' in side else None
+        shared_side = dict(side, error=code or 'ERROR') if 'error' in side else dict(side)
+        shared_result[x] = shared_side
         sides[x] = dict(version=side.get('version'), prompt=side.get('prompt'), promptFile=named('prompt'), request=named('request'),
-                        reply=named('reply'), completed='text' in side, error=side.get('error'), seconds=side.get('seconds'),
-                        words=side.get('words'), adapter={k: reply[k] for k in REPLY_FIELDS if k in reply} if isinstance(reply, dict) else None)
+                        reply=named('reply'), completed='text' in side, error=shared_side.get('error'), seconds=side.get('seconds'),
+                        words=side.get('words'), adapter={k: v for k, v in (safe[x] or {}).items() if k != 'content'} if safe[x] is not None else None)
+        if safe[x] is not None:
+            files[f'reply-{x}.json'] = json.dumps(safe[x], ensure_ascii=False, indent=1).encode()
+    files['result.json'] = json.dumps(shared_result, ensure_ascii=False, indent=1).encode()
+    recorded = 'code' in result
     packet = dict(
         schema='companion-lab-compare-packet/1', comparison=cid, at=result.get('at'),
         message=result.get('message'), model=result.get('model'), effort=result.get('effort'), plugin=result.get('plugin'),
         continued=result.get('continued'), historyTurns=result.get('history_turns'), sides=sides,
-        # The adapter's file, not its endpoint: base_url can name a private server, so it is left out.
-        adapter=Path(MODEL['command'][-1]).as_posix() if MODEL.get('command') else None, code=code_files(),
-        files={n: hashlib.sha256(d).hexdigest() for n, d in files.items()},
-        notes=['request-a/b.json are exactly what the context plugin passed to the model adapter. The adapter may add fields (its '
-               'reply records them as addedToRequest), and the model may render the messages differently through its chat template.',
+        # Recorded when the comparison ran. The adapter is named by its script, never its endpoint: base_url can name a private server.
+        adapter=result.get('adapter'), code=result.get('code'), codeScope=result.get('codeScope'),
+        missing=[n for n in PACKET_MEMBERS if raw[n] is None],
+        files={n: hashlib.sha256(d).hexdigest() for n, d in sorted(files.items())},
+        notes=['request-a/b.json and prompt-a/b.json are the lab\'s saved files, unchanged. request-a/b.json are exactly what the '
+               'context plugin passed to the model adapter. The adapter may add fields (its reply records them as addedToRequest), and the '
+               'model may render the messages differently through its chat template.',
+               'reply-a/b.json and result.json are share-safe copies: provider error text, exception text and detail messages are reduced '
+               'to their codes, and fields an adapter adds beyond the standard ones are left out. The lab\'s own data/compares folder keeps '
+               'the full originals.',
                'model and usage under each side\'s adapter are what the endpoint reported, when it reported them.',
-               'Comparisons made before packets existed have no prompt-a/b.json; their prompt versions are named but not included.',
-               'The endpoint address and any key are never included. Messages and prompts are included as written: check them for '
-               'personal details before sharing.'])
+               'missing lists the files this comparison never wrote: a side whose plugin failed has no request or reply, and comparisons '
+               'made before packets existed have no prompt-a/b.json.'
+               + ('' if recorded else ' This comparison also predates code fingerprints, so adapter, code and codeScope are not recorded.'),
+               'The endpoint address and any key are never included. The message, prompts and replies are included as written and can '
+               'hold anything you or the model wrote: read the packet before you share it.'])
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name, data in files.items():
+        for name, data in sorted(files.items()):
             z.writestr(f'{cid}/{name}', data)
         z.writestr(f'{cid}/packet.json', json.dumps(packet, ensure_ascii=False, indent=1))
     return buffer.getvalue()
