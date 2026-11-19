@@ -106,6 +106,15 @@ In the Lab drawer, **Import character card** reads SillyTavern cards (V1, V2 or 
 
 In the Lab drawer, **Side by side** sends one message under two saved prompt versions and shows the replies next to each other. Leave it fresh, or tick **continue the open conversation** to send it after that conversation's turns. Nothing is added to the conversation. Both requests and replies are kept in `data/compares/`.
 
+**Download packet** saves one comparison as a single zip containing:
+
+- both requests, exactly as the context plugin passed them to the model adapter;
+- both replies, with the finish reason, the served model and token counts when the endpoint reports them;
+- both prompt versions, as they were used;
+- the result, and `packet.json`, which lists what each file is, with SHA-256s of the files and of the lab, plugin and adapter code that ran.
+
+The endpoint address and any key are never included. Messages and prompts are included as written, so check them for personal details before you share a packet. The request files show what the lab sent, not the token stream the model received: a model's chat template can render the same messages differently.
+
 ## Test it
 
 ```bash

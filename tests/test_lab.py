@@ -1,7 +1,7 @@
 """End-to-end test of the lab with the turn plugin and the OpenAI-compatible adapter, against a fake model. No key or network needed.
     python -X utf8 -B tests/test_lab.py
 """
-import json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import hashlib, io, json, os, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -32,7 +32,8 @@ class FakeModel(BaseHTTPRequestHandler):
             self.send_response(500 if failing[0] is True else failing[0])
             self.end_headers()
             return
-        data = json.dumps(dict(choices=[dict(message=dict(content=f'Reply {len(calls)}'), finish_reason='stop')])).encode()
+        data = json.dumps(dict(model='fake-model-served', usage=dict(prompt_tokens=11, completion_tokens=2, total_tokens=13),
+                               choices=[dict(message=dict(content=f'Reply {len(calls)}'), finish_reason='stop')])).encode()
         self.send_response(200)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
@@ -229,6 +230,43 @@ def main():
             check('the two sides used their own versions', sent_a[0] != sent_a[1], sent_a)
             data_dir = Path(tmp) / 'data' / 'compares' / cmp_['id']
             check('both requests and the result are kept', (data_dir / 'request-a.json').exists() and (data_dir / 'request-b.json').exists() and (data_dir / 'result.json').exists())
+
+            # The comparison packet: one zip with the kept files unchanged, both prompt versions as used, and packet.json.
+            def post_raw(body):
+                req = urllib.request.Request(base + '/api/compare/export', data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'X-Companion-Lab': '1'})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        return r.status, r.headers, r.read()
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code, e.headers, e.read()
+            status, headers, body = post_raw(dict(id=cmp_['id']))
+            z = zipfile.ZipFile(io.BytesIO(body)) if status == 200 else None
+            names = sorted(n.split('/', 1)[1] for n in z.namelist()) if z else []
+            check('the packet downloads as a zip', status == 200 and headers.get('Content-Type') == 'application/zip'
+                  and f"companion-lab-compare-{cmp_['id']}.zip" in headers.get('Content-Disposition', ''), (status, body[:200]))
+            check('it holds both requests, replies and prompt versions, the result and packet.json',
+                  names == ['packet.json', 'prompt-a.json', 'prompt-b.json', 'reply-a.json', 'reply-b.json', 'request-a.json', 'request-b.json', 'result.json'], names)
+            if z:
+                kept_same = all(z.read(f"{cmp_['id']}/{n}") == (data_dir / n).read_bytes() for n in names if n != 'packet.json')
+                check('the kept files go in unchanged', kept_same)
+                pk = json.loads(z.read(f"{cmp_['id']}/packet.json"))
+                check('packet.json names each side: its version, prompt digest, request and reply',
+                      pk['sides']['a']['version'] == h[-1] and pk['sides']['b']['version'] == other and pk['sides']['a']['request'] == 'request-a.json'
+                      and pk['sides']['a']['prompt'] == cmp_['a']['prompt'] and pk['plugin'] == 'turns', pk.get('sides'))
+                check('packet.json carries completion status, served model and token counts',
+                      all(pk['sides'][x]['completed'] and pk['sides'][x]['adapter']['finish_reason'] == 'stop' and pk['sides'][x]['adapter']['model'] == 'fake-model-served'
+                          and pk['sides'][x]['adapter']['usage']['total_tokens'] == 13 for x in 'ab'), pk.get('sides'))
+                check('the prompt versions in the packet are the ones each side used',
+                      json.loads(z.read(f"{cmp_['id']}/prompt-b.json"))['parts'] == post('/api/prompt/version', dict(name=other))['config']['parts'])
+                check('packet.json lists every file with its SHA-256', all(pk['files'][n] == hashlib.sha256(z.read(f"{cmp_['id']}/{n}")).hexdigest() for n in names if n != 'packet.json')
+                      and 'lab_server.py' in pk['code'] and 'models/openai_compatible/adapter.py' in pk['code'], pk.get('code'))
+                whole = b''.join(z.read(n) for n in z.namelist())
+                check('the endpoint address and key are not in the packet', b'127.0.0.1' not in whole and b'LAB_TEST_KEY' not in whole and b'test-key-value' not in whole)
+            bad_id = post_raw(dict(id='../sessions'))
+            check('an invalid comparison id is refused', bad_id[0] == 400, bad_id)
+            gone = post_raw(dict(id='20200101-000000-abcdef'))
+            check('an unknown comparison is not found, naming no folder', gone[0] == 404 and b'compares' not in gone[2], gone)
             kept = json.loads((Path(tmp) / 'data' / 'sessions' / (sid + '.json')).read_text(encoding='utf-8'))['turns']
             n1 = len(calls)
             cont = post('/api/compare', dict(a=h[-1], b=h[-1], message='Go on', model='fake-model', effort='default', id=sid))

@@ -36,18 +36,21 @@ def added(effort):
 
 def chat(options, request, effort):
     body = dict(request, **added(effort))
-    choice = call(options, '/chat/completions', body)['choices'][0]
+    response = call(options, '/chat/completions', body)
+    choice = response['choices'][0]
     message, finish = choice['message'], choice.get('finish_reason')
     content = message.get('content')
+    # What the endpoint reported about this call, kept with every outcome: the model it says served it, and its token counts.
+    served = {k: v for k, v in (('model', response.get('model')), ('usage', response.get('usage'))) if v is not None}
     # This adapter cannot execute tools. Truncated, filtered, or non-text output is
     # evidence of an attempted generation, not a completed conversational turn.
     if message.get('tool_calls') or message.get('function_call') or finish not in (None, 'stop'):
         return dict(ok=False, error='MODEL_INCOMPLETE', retry=False,
-                    detail='The model stopped without a complete text reply.', finish_reason=finish)
+                    detail='The model stopped without a complete text reply.', finish_reason=finish, **served)
     if not isinstance(content, str) or not content.strip():
         return dict(ok=False, error='MODEL_NO_TEXT', retry=False,
-                    detail='The model returned no text reply.')
-    return dict(ok=True, content=content, finish_reason=finish)
+                    detail='The model returned no text reply.', **served)
+    return dict(ok=True, content=content, finish_reason=finish, **served)
 
 
 def missing_key(options):

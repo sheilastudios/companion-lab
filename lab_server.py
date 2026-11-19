@@ -2,7 +2,7 @@
 The core keeps conversations, prompt versions and the exact bytes sent. A context plugin decides what gets sent; a model adapter sends it.
 See lab.config.json. Run: python -X utf8 lab_server.py
 """
-import base64, hashlib, json, os, re, struct, subprocess, sys, threading, time, uuid, zlib
+import base64, hashlib, io, json, os, re, struct, subprocess, sys, threading, time, uuid, zipfile, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -324,6 +324,10 @@ def compare(b):
     # Both versions are read before either side runs, so a missing one fails cleanly instead of after a whole model turn.
     cfgs = [read(PROMPTS / 'history' / name) for name in names]
     cid = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
+    # Each side's prompt version is kept with the comparison as it was used, so a packet still reproduces it after the version is
+    # edited or deleted from the history.
+    for i, cfg in enumerate(cfgs):
+        write(DATA / 'compares' / cid / f'prompt-{"ab"[i]}.json', cfg)
     out = [None, None]
 
     def side(i):
@@ -341,17 +345,73 @@ def compare(b):
             done = plugin('commit', session=sess, request_id=f'{cid}-{i}', raw=reply['content'], message=message)
             if not done.get('ok'):
                 raise RuntimeError(f"The context plugin refused this reply: {done.get('reason')}")
-            out[i] = dict(version=names[i], text=done['text'], seconds=round(time.monotonic() - started, 1), words=len(done['text'].split()))
+            out[i] = dict(version=names[i], prompt=digest(cfg), text=done['text'], seconds=round(time.monotonic() - started, 1), words=len(done['text'].split()))
         except Exception as e:
-            out[i] = dict(version=names[i], error=str(e)[-600:], seconds=round(time.monotonic() - started, 1))
+            out[i] = dict(version=names[i], prompt=digest(cfg), error=str(e)[-600:], seconds=round(time.monotonic() - started, 1))
     # One side after the other: a model adapter such as the Codex one runs a local app-server against shared state, and two at once
     # (or three with a turn) can collide. Side by side runs under the same lock as a turn.
     side(0)
     side(1)
-    result = dict(id=cid, at=time.strftime('%Y-%m-%d %H:%M:%S'), message=message, model=b['model'], effort=b['effort'], continued=b.get('id') or None,
+    result = dict(id=cid, at=time.strftime('%Y-%m-%d %H:%M:%S'), message=message, model=b['model'], effort=b['effort'], plugin=PLUGIN.get('id'), continued=b.get('id') or None,
                   history_turns=len(turns), a=out[0], b=out[1])
     write(DATA / 'compares' / cid / 'result.json', result)
     return result
+
+
+def code_files():
+    """The code that ran, by file and SHA-256: the lab, the context plugin and the model adapter (the files their commands name).
+    A packet records these instead of a version number, so a reader can tell whether their copy matches."""
+    found = {ROOT / 'lab_server.py', PLUGIN_DIR / 'plugin.json'}
+    for cmd, cwd in ((PLUGIN['command'], PLUGIN_DIR), (MODEL['command'], MODEL_DIR)):
+        found.update(cwd / a for a in cmd[1:] if isinstance(a, str) and re.search(r'\.(py|mjs|js)$', a))
+    out = {}
+    for f in sorted(p.resolve() for p in found if p.is_file()):
+        name = f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.name
+        out[name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+# What packet.json copies from each side's adapter reply: completion status and what the endpoint reported. Never the reply text,
+# which stays in reply-a/b.json.
+REPLY_FIELDS = ('ok', 'error', 'finish_reason', 'model', 'usage', 'attempts', 'addedToRequest')
+
+
+def compare_export(cid):
+    """One Side by side comparison as a single zip: the files the lab kept for it, unchanged, plus packet.json, which says what each
+    file is and gathers what a reader checks first (each side's prompt version, completion status and token counts).
+    Never included: the endpoint address, keys, or anything outside this comparison's folder."""
+    if not isinstance(cid, str) or not re.fullmatch(r'\d{8}-\d{6}-[0-9a-f]{6}', cid):
+        raise ValueError('Invalid comparison')
+    folder = DATA / 'compares' / cid
+    result = read(folder / 'result.json')
+    files = {kept.name: kept.read_bytes() for kept in sorted(folder.glob('*.json'))}
+    sides = {}
+    for x in 'ab':
+        side = result.get(x) or {}
+        named = lambda kind: f'{kind}-{x}.json' if f'{kind}-{x}.json' in files else None
+        reply = json.loads(files[named('reply')]) if named('reply') else None
+        sides[x] = dict(version=side.get('version'), prompt=side.get('prompt'), promptFile=named('prompt'), request=named('request'),
+                        reply=named('reply'), completed='text' in side, error=side.get('error'), seconds=side.get('seconds'),
+                        words=side.get('words'), adapter={k: reply[k] for k in REPLY_FIELDS if k in reply} if isinstance(reply, dict) else None)
+    packet = dict(
+        schema='companion-lab-compare-packet/1', comparison=cid, at=result.get('at'),
+        message=result.get('message'), model=result.get('model'), effort=result.get('effort'), plugin=result.get('plugin'),
+        continued=result.get('continued'), historyTurns=result.get('history_turns'), sides=sides,
+        # The adapter's file, not its endpoint: base_url can name a private server, so it is left out.
+        adapter=Path(MODEL['command'][-1]).as_posix() if MODEL.get('command') else None, code=code_files(),
+        files={n: hashlib.sha256(d).hexdigest() for n, d in files.items()},
+        notes=['request-a/b.json are exactly what the context plugin passed to the model adapter. The adapter may add fields (its '
+               'reply records them as addedToRequest), and the model may render the messages differently through its chat template.',
+               'model and usage under each side\'s adapter are what the endpoint reported, when it reported them.',
+               'Comparisons made before packets existed have no prompt-a/b.json; their prompt versions are named but not included.',
+               'The endpoint address and any key are never included. Messages and prompts are included as written: check them for '
+               'personal details before sharing.'])
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, data in files.items():
+            z.writestr(f'{cid}/{name}', data)
+        z.writestr(f'{cid}/packet.json', json.dumps(packet, ensure_ascii=False, indent=1))
+    return buffer.getvalue()
 
 
 def spath(sid):
@@ -593,10 +653,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def send(self, status, value, kind='application/json'):
+    def send(self, status, value, kind='application/json', download=None):
         data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header('Content-Type', kind)
+        if download:
+            self.send_header('Content-Disposition', f'attachment; filename="{download}"')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
@@ -673,6 +735,8 @@ class Handler(BaseHTTPRequestHandler):
                 if 'requestId' in b and b['requestId'] != t['requestId']:
                     return self.send(409, {'error': 'This turn changed while its request was being read.'})
                 return self.send(200, read(REQUESTS / s['id'] / (t['requestId'] + '.json')))
+            if route == '/api/compare/export':
+                return self.send(200, compare_export(b['id']), 'application/zip', f"companion-lab-compare-{b['id']}.zip")
             held = LOCK.acquire(blocking=False)
             if not held:
                 return self.send(409, {'error': 'A turn is in progress.'})
