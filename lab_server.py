@@ -404,24 +404,26 @@ def code_snapshot():
         root, data = ROOT.resolve(), DATA.resolve()
         required = [p for p in [(PLUGIN_DIR / 'plugin.json').resolve(), *script_paths()] if p.is_file()]
         folders = {PLUGIN_DIR.resolve()} | {s.parent for s in required if s.parent != root}
-        extra = set()
+        extra, scan_errors = set(), []
         for folder in folders:
-            try:
-                for candidate in folder.rglob('*'):
-                    if candidate.is_file() and not CODE_SKIP & set(candidate.parts) and candidate.suffix not in ('.pyc', '.log') and not candidate.resolve().is_relative_to(data):
+            # os.walk reports a folder it cannot list instead of skipping it silently, so an incomplete scan is known.
+            for here, subdirs, names in os.walk(folder, onerror=scan_errors.append):
+                subdirs[:] = [d for d in subdirs if d not in CODE_SKIP]
+                for name in names:
+                    candidate = Path(here) / name
+                    if candidate.suffix not in ('.pyc', '.log') and candidate.is_file() and not candidate.resolve().is_relative_to(data):
                         extra.add(candidate.resolve())
-            except OSError:
-                pass
         ordered = list(dict.fromkeys(required)) + sorted(extra - set(required))
+        limit = max(CODE_MAX, len(required))
         files, unreadable = {}, []
-        for f in ordered[:max(CODE_MAX, len(required))]:
+        for f in ordered[:limit]:
             try:
                 files[code_name(f)] = hashlib.sha256(f.read_bytes()).hexdigest()
             except OSError:
                 unreadable.append(code_name(f))
-        return dict(files=files, unreadable=unreadable, omitted=max(0, len(ordered) - max(CODE_MAX, len(required))))
+        return dict(files=files, unreadable=unreadable, omitted=max(0, len(ordered) - limit), scanIncomplete=bool(scan_errors))
     except Exception:
-        return dict(files={}, unreadable=[], omitted=0, failed=True)
+        return dict(files={}, unreadable=[], omitted=0, scanIncomplete=True, failed=True)
 
 
 def code_record(before, after):
@@ -431,16 +433,28 @@ def code_record(before, after):
         lab_on_disk = hashlib.sha256((ROOT / 'lab_server.py').read_bytes()).hexdigest()
     except OSError:
         lab_on_disk = None
+    failed = bool(before.get('failed') or after.get('failed'))
+    unreadable = sorted(set(before['unreadable']) | set(after['unreadable']))
+    omitted = max(before['omitted'], after['omitted'])
+    scan_incomplete = bool(before.get('scanIncomplete') or after.get('scanIncomplete'))
+    # Two separate questions. stable: nothing in scope changed between the two snapshots. complete: every file in scope was found
+    # and read. certain needs both.
+    stable = not changed and not failed
+    complete = not failed and not unreadable and not omitted and not scan_incomplete
     status = dict(taken='Plugin and adapter files: read from disk just before the first side ran, and checked again after the last side. '
                         'lab_server.py: the code this lab process loaded.',
-                  changedDuringRun=changed, unreadable=sorted(set(before['unreadable']) | set(after['unreadable'])),
-                  omitted=before['omitted'], labChangedOnDiskSinceStart=lab_on_disk != LAB_SOURCE_SHA,
-                  certain=not changed and not before.get('failed') and not after.get('failed'))
-    if before.get('failed') or after.get('failed'):
-        status['note'] = 'Fingerprints could not be taken for this comparison.'
-    elif changed:
-        status['note'] = ('Files changed on disk while this comparison ran, so which version each side ran is uncertain. '
-                          'The fingerprints are from before the first side.')
+                  changedDuringRun=changed, unreadable=unreadable, omitted=omitted, scanIncomplete=scan_incomplete,
+                  labChangedOnDiskSinceStart=lab_on_disk != LAB_SOURCE_SHA, stable=stable, complete=complete, certain=stable and complete)
+    notes = []
+    if failed:
+        notes.append('Fingerprints could not be taken for this comparison.')
+    if changed:
+        notes.append('Files changed on disk while this comparison ran, so which version each side ran is uncertain. '
+                     'The fingerprints are from before the first side.')
+    if unreadable or omitted or scan_incomplete:
+        notes.append('Not every file in scope was fingerprinted (see unreadable, omitted and scanIncomplete), so the record is incomplete.')
+    if notes:
+        status['note'] = ' '.join(notes)
     return dict(code={'lab_server.py': LAB_SOURCE_SHA, **before['files']}, codeScope=CODE_SCOPE, codeStatus=status)
 
 
@@ -448,7 +462,22 @@ def code_record(before, after):
 PACKET_MEMBERS = ('result.json', 'prompt-a.json', 'prompt-b.json', 'request-a.json', 'request-b.json', 'reply-a.json', 'reply-b.json')
 
 
-CODE_TOKEN = re.compile(r'[A-Za-z0-9_.\-]{1,64}')
+# A code is one identifier: letters, digits and underscores. No dots, hyphens, colons or slashes, so a hostname, an address or a
+# URL can never pass as one.
+CODE_TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}')
+# What a packet keeps of an adapter's addedToRequest: standard generation settings, each a boolean, a number or one identifier.
+# Anything else an adapter added (routing, authentication, URLs) is left out and only counted.
+GENERATION_SETTINGS = {'reasoning_effort', 'effort', 'temperature', 'top_p', 'top_k', 'min_p', 'max_tokens', 'max_completion_tokens',
+                       'seed', 'presence_penalty', 'frequency_penalty', 'repeat_penalty', 'n', 'stream', 'verbosity', 'response_format'}
+
+
+def generation_settings(added):
+    """An adapter's addedToRequest as a packet carries it: GENERATION_SETTINGS only, with plain values, plus how many were left out."""
+    kept = {}
+    for k, v in added.items():
+        if k in GENERATION_SETTINGS and (isinstance(v, (bool, int, float)) or (isinstance(v, str) and CODE_TOKEN.fullmatch(v))):
+            kept[k] = v
+    return kept, len(added) - len(kept)
 
 
 def error_code(value, depth=0):
@@ -481,13 +510,13 @@ def counts(value, depth=0):
     if not isinstance(value, dict):
         return None
     out = {}
-    for k, v in value.items():
+    for k, amount in value.items():
         if not isinstance(k, str) or not CODE_TOKEN.fullmatch(k):
             continue
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            out[k] = v
-        elif isinstance(v, dict) and depth == 0:
-            out[k] = counts(v, 1)
+        if type(amount) in (int, float):
+            out[k] = amount
+        elif isinstance(amount, dict) and depth == 0:
+            out[k] = counts(amount, 1)
     return out
 
 
@@ -502,7 +531,7 @@ def model_name(value):
 def share_safe_reply(reply):
     """An adapter reply as a packet carries it, every field bounded by shape: ok and retry as booleans, the reply text as written,
     finish_reason as a code, the served model as a bare name, usage as numbers, the error and each attempt's error as codes, and
-    addedToRequest (what the adapter added to the request it sent). No detail text and no other fields."""
+    addedToRequest reduced to standard generation settings (with a count of what was left out). No detail text and no other fields."""
     if not isinstance(reply, dict):
         return None
     out = {}
@@ -519,7 +548,9 @@ def share_safe_reply(reply):
     if 'usage' in reply:
         out['usage'] = counts(reply['usage'])
     if isinstance(reply.get('addedToRequest'), dict):
-        out['addedToRequest'] = reply['addedToRequest']
+        out['addedToRequest'], left_out = generation_settings(reply['addedToRequest'])
+        if left_out:
+            out['addedToRequestOmitted'] = left_out
     if 'error' in reply:
         out['error'] = error_code(reply['error'])
     if isinstance(reply.get('attempts'), list):
@@ -582,30 +613,42 @@ def compare_export(cid):
         if safe[x] is not None:
             files[f'reply-{x}.json'] = json.dumps(safe[x], ensure_ascii=False, indent=1).encode()
     files['result.json'] = json.dumps(shared_result, ensure_ascii=False, indent=1).encode()
-    recorded = 'code' in result
+    # Three kinds of record: fingerprints taken before and after the run (codeStatus present), a code map from an earlier lab version
+    # that hashed the files once after the run (code without codeStatus), and no fingerprints at all.
+    if isinstance(result.get('codeStatus'), dict):
+        code_status, code_note = result['codeStatus'], (
+            'code holds fingerprints taken from disk just before the first side ran (lab_server.py: the code the lab process had '
+            'loaded). codeStatus.stable says no file in scope changed during the run; codeStatus.complete says every file in scope was '
+            'found and read; certain needs both.')
+    elif 'code' in result:
+        code_status = dict(taken='Once, after both sides had run, by an earlier version of the lab.', stable=None, complete=None, certain=False)
+        code_note = ('This comparison was made by an earlier version of the lab, which fingerprinted the code once after the run, so '
+                     'code may not be the code either side ran. codeStatus.certain is false.')
+    else:
+        code_status, code_note = None, 'This comparison predates code fingerprints, so adapter, code and codeScope are not recorded.'
     packet = dict(
         schema='companion-lab-compare-packet/1', comparison=cid, at=result.get('at'),
         message=result.get('message'), model=result.get('model'), effort=result.get('effort'), plugin=result.get('plugin'),
         continued=result.get('continued'), historyTurns=result.get('history_turns'), sides=sides,
         # Recorded when the comparison ran. The adapter is named by its script, never its endpoint: base_url can name a private server.
-        adapter=result.get('adapter'), code=result.get('code'), codeScope=result.get('codeScope'), codeStatus=result.get('codeStatus'),
+        adapter=result.get('adapter'), code=result.get('code'), codeScope=result.get('codeScope'), codeStatus=code_status,
         missing=[n for n in PACKET_MEMBERS if raw[n] is None],
         files={n: hashlib.sha256(d).hexdigest() for n, d in sorted(files.items())},
         notes=['request-a/b.json and prompt-a/b.json are the lab\'s saved files, unchanged. request-a/b.json are exactly what the '
-               'context plugin passed to the model adapter. The adapter may add fields (its reply records them as addedToRequest), and the '
-               'model may render the messages differently through its chat template.',
-               'reply-a/b.json and result.json are share-safe copies. Every error, whatever its shape, is reduced to a short code; detail '
-               'text and fields beyond the standard ones are left out; the served model is a bare name and usage is numbers only. The '
-               'lab\'s own data/compares folder keeps the full originals.',
+               'context plugin passed to the model adapter. The adapter may add fields, and the model may render the messages '
+               'differently through its chat template.',
+               'reply-a/b.json and result.json are share-safe copies, with each adapter field reduced to a safe form. Every error, '
+               'whatever its shape, becomes one identifier-style code (no dots, colons or slashes) or ERROR; detail text is dropped. '
+               'finish_reason is a code, the served model is a bare name, and usage is numbers only. addedToRequest keeps only standard '
+               'generation settings with plain values; addedToRequestOmitted counts anything else the adapter added. Fields beyond '
+               'these are left out. The lab\'s own data/compares folder keeps the full originals.',
                'model and usage under each side\'s adapter are what the endpoint reported, when it reported them.',
                'missing lists the files this comparison never saved. For example, a side whose plugin failed while assembling its request '
-               'has no request or reply, and comparisons made before packets existed have no prompt-a/b.json.'
-               + ('' if recorded else ' This comparison also predates code fingerprints, so adapter, code and codeScope are not recorded.'),
-               'code holds fingerprints taken from disk just before the first side ran (lab_server.py: the code the lab process had '
-               'loaded). codeStatus says whether any file changed during the run, which files could not be read, and how many past the '
-               'limit were left out; certain is true only when none changed and all were read.',
-               'The endpoint address and any key are never included. The message, prompts and replies are included as written and can '
-               'hold anything you or the model wrote: read the packet before you share it.'])
+               'has no request or reply, and comparisons made before packets existed have no prompt-a/b.json.',
+               code_note,
+               'The endpoint address and any key are never included, and the adapter metadata is reduced as described above. The message, '
+               'prompts, requests and replies are included as written and can hold anything you or the model wrote: read the packet '
+               'before you share it.'])
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
         for name, data in sorted(files.items()):
